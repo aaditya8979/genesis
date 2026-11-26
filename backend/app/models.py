@@ -141,3 +141,4 @@ class AdminAuditLog(Base):
     target_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     details: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+

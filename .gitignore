@@ -16,7 +16,11 @@ venv/
 *.sqlite
 *.sqlite3
 pgdata/
+pgdata_local/
 backups/
+
+# TypeScript build cache
+*.tsbuildinfo
 
 # Node / Frontend
 node_modules/
@@ -27,3 +31,4 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+
