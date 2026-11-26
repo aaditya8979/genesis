@@ -27,8 +27,15 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-genesis_admin}:${POSTGRES_PASSWORD:-genesis_strong_pass_2026}@postgres:5432/${POSTGRES_DB:-genesis_db}
       SECRET_KEY: ${SECRET_KEY:-genesis_jwt_secret_2026_prod}
       ADMIN_SECRET_KEY: ${ADMIN_SECRET_KEY:-genesis_admin_master_2026}
+      SNAPSHOT_INTERVAL_SECONDS: ${SNAPSHOT_INTERVAL_SECONDS:-5.0}
+      AUTO_RESTORE_ON_BOOT: ${AUTO_RESTORE_ON_BOOT:-true}
       STANDBY_SYNC_URL: ${STANDBY_SYNC_URL:-}
+      PRIMARY_SYNC_URL: ${PRIMARY_SYNC_URL:-}
       STANDBY_SYNC_SECRET: ${STANDBY_SYNC_SECRET:-genesis_standby_sync_2026}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:-}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL:-}
+      SUPABASE_SNAPSHOT_TABLE: ${SUPABASE_SNAPSHOT_TABLE:-genesis_snapshots}
       BACKUP_DIR: /app/backups
     volumes:
       - ./backups:/app/backups

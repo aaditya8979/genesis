@@ -21,10 +21,18 @@ class Settings(BaseSettings):
     # Real-Time Tick & Snapshot Intervals
     TICK_INTERVAL_SECONDS: float = 1.0
     JITTER_INTERVAL_SECONDS: float = 2.0
-    SNAPSHOT_INTERVAL_SECONDS: float = 15.0
+    SNAPSHOT_INTERVAL_SECONDS: float = 5.0
     BACKUP_DIR: str = "./backups"
+    AUTO_RESTORE_ON_BOOT: bool = True
     STANDBY_SYNC_URL: str = ""
+    PRIMARY_SYNC_URL: str = ""
     STANDBY_SYNC_SECRET: str = "genesis_standby_sync_2026"
+
+    # Tier-3 Off-Site Supabase Cloud Vault (zero-latency async mirror)
+    SUPABASE_URL: str = ""
+    SUPABASE_SERVICE_KEY: str = ""
+    SUPABASE_DB_URL: str = ""
+    SUPABASE_SNAPSHOT_TABLE: str = "genesis_snapshots"
 
     # Per-user rate limit (never by IP due to auditorium NAT)
     ORDER_RATE_LIMIT_WINDOW_SEC: float = 2.0
