@@ -23,4 +23,6 @@ RUN mkdir -p /app/backups
 EXPOSE 8000
 
 # Strictly 1 uvloop worker so all 1,000 WebSockets share one single authoritative RAM price state
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "uvloop", "--http", "httptools", "--ws-ping-interval", "20", "--ws-ping-timeout", "20"]
+# --timeout-keep-alive 65 > nginx keepalive_timeout prevents 502 connection reset under burst load
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "uvloop", "--http", "httptools", "--backlog", "4096", "--timeout-keep-alive", "65", "--ws-ping-interval", "20", "--ws-ping-timeout", "20"]
+
