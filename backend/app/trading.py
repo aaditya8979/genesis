@@ -1,5 +1,6 @@
 """Atomic Order Execution Engine, Anti-Exploit Guardrails, Rate Limiter & Short Squeeze Supervisor."""
 
+import asyncio
 from collections import defaultdict, deque
 from decimal import Decimal, ROUND_HALF_UP
 import time
@@ -13,6 +14,9 @@ from app.models import AdminAuditLog, Holding, Stock, Transaction, User, Wallet
 from app.ws_manager import ws_manager
 
 settings = get_settings()
+
+# Per-user asyncio lock serializes concurrent clicks from the SAME user (zero contention across different users)
+_user_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def d2(val: float | Decimal | int) -> Decimal:
@@ -90,7 +94,12 @@ async def compute_user_portfolio(db: AsyncSession, user_id: str) -> dict:
 
     cash = d2(wallet.cash_balance)
     collateral = d2(wallet.collateral_locked)
-    net_worth = d2(cash + long_value + collateral - short_liability)
+    # Net Worth = Cash + Long Market Value + Locked Short Margin + Unrealized P&L (Longs already included in Long Market Value)
+    short_unrealized = Decimal("0.00")
+    for item in holding_items:
+        if item["position_type"] == "SHORT":
+            short_unrealized += d2(item["unrealized_pnl"])
+    net_worth = d2(cash + long_value + collateral + short_unrealized)
 
     return {
         "cash_balance": float(cash),
@@ -151,6 +160,45 @@ async def execute_trade(
 
     order_rate_limiter.check_or_raise(user.id)
 
+    async with _user_locks[user.id]:
+        return await _execute_trade_locked(
+            db=db,
+            user=user,
+            symbol=symbol,
+            action=action,
+            quantity=quantity,
+            client_order_id=client_order_id,
+        )
+
+
+async def _execute_trade_locked(
+    db: AsyncSession,
+    user: User,
+    symbol: str,
+    action: str,
+    quantity: int,
+    client_order_id: str,
+) -> dict:
+    # Re-check idempotency inside lock in case duplicate request raced
+    existing_tx_res = await db.execute(
+        select(Transaction).where(Transaction.client_order_id == client_order_id)
+    )
+    existing_tx = existing_tx_res.scalar_one_or_none()
+    if existing_tx is not None:
+        portfolio = await compute_user_portfolio(db, user.id)
+        return {
+            "status": "FILLED",
+            "idempotent_replay": True,
+            "transaction_id": existing_tx.id,
+            "symbol": existing_tx.symbol,
+            "action": existing_tx.action,
+            "quantity": existing_tx.quantity,
+            "execution_price": float(existing_tx.execution_price),
+            "total_amount": float(existing_tx.total_amount),
+            "realized_pnl": float(existing_tx.realized_pnl),
+            "portfolio": portfolio,
+        }
+
     is_sqlite = db.bind.dialect.name == "sqlite" if db.bind else False
 
     # Lock wallet row FOR UPDATE on Postgres to prevent double-spend race conditions
@@ -180,7 +228,7 @@ async def execute_trade(
 
     # Calculate current total portfolio net worth for 35% cap
     long_val = Decimal("0.00")
-    short_liab = Decimal("0.00")
+    short_unrealized = Decimal("0.00")
     current_long_holding: Holding | None = None
     current_short_holding: Holding | None = None
 
@@ -191,11 +239,11 @@ async def execute_trade(
             if h.symbol == symbol:
                 current_long_holding = h
         else:
-            short_liab += d2(Decimal(h.quantity) * p)
+            short_unrealized += d2((d2(h.avg_entry_price) - p) * Decimal(h.quantity))
             if h.symbol == symbol:
                 current_short_holding = h
 
-    total_net_worth = d2(wallet.cash_balance + long_val + wallet.collateral_locked - short_liab)
+    total_net_worth = d2(wallet.cash_balance + long_val + wallet.collateral_locked + short_unrealized)
     cap_basis = max(total_net_worth, d2(settings.STARTING_CASH))
     max_single_stock_val = d2(cap_basis * Decimal(str(settings.MAX_CONCENTRATION_PCT)))
 
