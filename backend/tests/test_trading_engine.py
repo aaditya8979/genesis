@@ -12,6 +12,7 @@ if TEST_DB_PATH.exists():
     TEST_DB_PATH.unlink()
 
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DB_PATH}"
+os.environ["ENVIRONMENT"] = "test"
 os.environ["BACKUP_DIR"] = "/tmp/genesis_test_backups"
 os.environ["ORDER_RATE_LIMIT_MAX_ORDERS"] = "50"  # Allow burst testing in unit suite
 
@@ -192,9 +193,25 @@ async def test_admin_topup_freeze_and_snapshot_restore():
         boot = (await ac.get("/api/v1/bootstrap", headers=headers)).json()
         assert boot["portfolio"]["cash_balance"] == 30000.0
 
+        # Place a trade to verify v2 snapshot preserves order history + idempotency across DB wipes
+        buy = await ac.post("/api/v1/trade/order", headers=headers, json={
+            "symbol": "TMND", "action": "BUY", "quantity": 5, "client_order_id": "snap-tx-1"
+        })
+        assert buy.status_code == 200
+        post_buy_cash = buy.json()["portfolio"]["cash_balance"]
+
+        # Trigger immediate backup cycle & verify status endpoint
+        bnow = await ac.post("/api/v1/system/backup/now", headers=admin_headers)
+        assert bnow.status_code == 200
+        assert bnow.json()["status"]["local_latest_seq"] >= 0
+
         # Export snapshot before wiping DB
         snap = (await ac.get("/api/v1/system/snapshot", headers=admin_headers)).json()
-        assert len(snap["users"]) == 1
+        assert snap["schema_version"] == 2
+        real_snap_users = [u for u in snap["users"] if u.get("cohort") == "REAL"]
+        assert len(real_snap_users) == 1
+        assert len(snap["users"]) == 41
+        assert any(t["client_order_id"] == "snap-tx-1" for t in snap["transactions"])
 
         # Freeze account -> trading blocked with 403
         await ac.post("/api/v1/admin/user/freeze", headers=admin_headers, json={
@@ -214,10 +231,12 @@ async def test_admin_topup_freeze_and_snapshot_restore():
 
         restore_res = await ac.post("/api/v1/system/restore", headers=admin_headers, json=snap)
         assert restore_res.status_code == 200
-        assert restore_res.json()["restored_users"] == 1
+        assert restore_res.json()["restored_users"] == 41
+        assert restore_res.json()["restored_transactions"] >= 1
 
-        restored_port = (await ac.get("/api/v1/portfolio/me", headers=headers)).json()
-        assert restored_port["cash_balance"] == 30000.0
+        restored_boot = (await ac.get("/api/v1/bootstrap", headers=headers)).json()
+        assert restored_boot["portfolio"]["cash_balance"] == post_buy_cash
+        assert any(tx["symbol"] == "TMND" for tx in restored_boot["transactions"])
 
 
 @pytest.mark.asyncio
@@ -251,4 +270,98 @@ async def test_concurrent_double_spend_prevention():
 
         port = (await ac.get("/api/v1/portfolio/me", headers=headers)).json()
         assert port["cash_balance"] >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_dynamic_market_whale_persistence_and_event_history():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        login = await ac.post("/api/v1/auth/login", json={
+            "email": "relogin@vitbhopal.ac.in",
+            "registration_no": "25BCE10777",
+        })
+        token = login.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        admin_headers = {"X-Admin-Secret": "genesis_admin_master_2026"}
+
+        # Set FRENZY regime and inject a whale surge on VIST
+        vol_res = await ac.patch("/api/v1/admin/volatility", headers=admin_headers, json={
+            "regime": "FRENZY", "simulate_flow": True
+        })
+        assert vol_res.status_code == 200
+        assert vol_res.json()["volatility_regime"] == "FRENZY"
+
+        before_vist = market_engine.stocks["VIST"].current_price
+        whale = await ac.post("/api/v1/admin/whale", headers=admin_headers, json={
+            "symbol": "VIST", "side": "BUY", "quantity": 10000
+        })
+        assert whale.status_code == 200
+        after_vist = whale.json()["after"]
+        assert after_vist > before_vist
+        # Anchor shifted proportionally so price holds instead of snapping right back down
+        assert market_engine.stocks["VIST"].anchor_price > before_vist
+
+        # Trigger 2 eras -> verify event_feed preserves non-overlapping timeline
+        await ac.post("/api/v1/admin/scenario/trigger", headers=admin_headers, json={"era_id": "ERA_1_DOT_COM"})
+        await ac.post("/api/v1/admin/scenario/trigger", headers=admin_headers, json={"era_id": "ERA_2_CAPEX"})
+
+        # Simulate re-login bootstrap -> preserves full candles, event_feed, and chart_markers
+        boot = await ac.get("/api/v1/bootstrap", headers=headers)
+        assert boot.status_code == 200
+        b = boot.json()
+        assert len(b["event_feed"]) >= 3
+        assert len(b["chart_markers"]) >= 2
+        assert len(b["stocks"][0]["candles"]) >= 48
+
+
+@pytest.mark.asyncio
+async def test_cohort_separation_real_import_and_tally():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        admin_headers = {"X-Admin-Secret": "genesis_admin_master_2026"}
+
+        # Pre-register / import 2 Real Participants separately from dummy bots
+        imp = await ac.post("/api/v1/admin/users/import-real", headers=admin_headers, json={
+            "participants": [
+                {
+                    "email": "real.one@vitbhopal.ac.in",
+                    "registration_no": "25BCE10991",
+                    "full_name": "Rohan Sharma",
+                },
+                {
+                    "email": "real.two@vitbhopal.ac.in",
+                    "registration_no": "25BAI10992",
+                    "full_name": "Ananya Verma",
+                },
+            ],
+            "starting_cash": 30000.0,
+        })
+        assert imp.status_code == 200
+        imp_data = imp.json()
+        assert imp_data["created"] >= 2 or imp_data["updated"] >= 2
+
+        # Create a test user via normal student login then move it to DUMMY
+        await ac.post("/api/v1/auth/login", json={
+            "email": "cohort.test@vitbhopal.ac.in",
+            "registration_no": "25BCE10777",
+        })
+        cohort_res = await ac.patch("/api/v1/admin/user/cohort", headers=admin_headers, json={
+            "registration_no": "25BCE10777",
+            "cohort": "DUMMY",
+        })
+        assert cohort_res.status_code == 200
+        assert cohort_res.json()["cohort"] == "DUMMY"
+
+        tally_res = await ac.get("/api/v1/admin/tally", headers=admin_headers)
+        assert tally_res.status_code == 200
+        tally = tally_res.json()
+        real_regs = {p["registration_no"] for p in tally["real_tally"]}
+        dummy_regs = {p["registration_no"] for p in tally["dummy_tally"]}
+        assert "25BCE10991" in real_regs
+        assert "25BAI10992" in real_regs
+        assert "25BCE10991" not in dummy_regs
+        assert "25BCE10777" in dummy_regs
+        assert tally["summary"]["real_count"] == len(tally["real_tally"])
+        assert tally["summary"]["dummy_count"] == len(tally["dummy_tally"])
+
 
