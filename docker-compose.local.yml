@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: genesis_local_postgres
+    restart: always
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB"]
+    environment:
+      POSTGRES_USER: genesis_admin
+      POSTGRES_PASSWORD: genesis_local_pass
+      POSTGRES_DB: genesis_db
+    volumes:
+      - ./pgdata_local:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U genesis_admin -d genesis_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    networks:
+      - genesis_local_net
+
+  backend:
+    build: ./backend
+    container_name: genesis_local_backend
+    restart: always
+    environment:
+      ENVIRONMENT: local_docker
+      DATABASE_URL: postgresql+asyncpg://genesis_admin:genesis_local_pass@postgres:5432/genesis_db
+      SECRET_KEY: genesis_jwt_secret_key_2026_vitb_change_in_prod
+      ADMIN_SECRET_KEY: genesis_admin_master_2026
+      BACKUP_DIR: /app/backups
+    volumes:
+      - ./backups:/app/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    networks:
+      - genesis_local_net
+
+  nginx:
+    image: nginx:alpine
+    container_name: genesis_local_nginx
+    restart: always
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.local.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    networks:
+      - genesis_local_net
+
+networks:
+  genesis_local_net:
+    driver: bridge
+
