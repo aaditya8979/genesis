@@ -6,19 +6,27 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import json
 import logging
-import os
-from pathlib import Path
 import time
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
-import httpx
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import desc, select
+import random
+from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import create_access_token, decode_token, get_current_user, verify_admin
+from app.backup_manager import (
+    apply_snapshot_restore,
+    build_full_snapshot,
+    execute_full_backup_cycle,
+    get_backup_status,
+    pull_latest_from_supabase,
+    request_background_backup,
+    snapshot_exporter_loop,
+    startup_auto_recover,
+)
 from app.config import get_settings
 from app.db import AsyncSessionLocal, Base, engine, get_db
 from app.market_engine import market_engine
@@ -92,9 +100,55 @@ class BroadcastHeadlineRequest(BaseModel):
     headline: str = Field(..., min_length=2, max_length=300)
 
 
+class VolatilityRegimeRequest(BaseModel):
+    regime: str = Field(..., pattern="^(CALM|DYNAMIC|FRENZY)$")
+    simulate_flow: bool = True
+
+
+class RealUserImportItem(BaseModel):
+    email: EmailStr
+    registration_no: str = Field(..., min_length=3, max_length=50)
+    full_name: str = Field(default="", max_length=150)
+
+
+class BulkImportRealUsersRequest(BaseModel):
+    participants: list[RealUserImportItem] = Field(..., min_length=1, max_length=1500)
+    starting_cash: float = Field(default=25000.0, gt=0, le=500000)
+
+
+class CohortUpdateRequest(BaseModel):
+    registration_no: str = Field(..., min_length=2, max_length=50)
+    cohort: str = Field(..., pattern="^(REAL|DUMMY)$")
+
+
 # ---------------------------------------------------------------------------
 # Database Seeding & Snapshot Persistence Helpers
 # ---------------------------------------------------------------------------
+DUMMY_ROSTER_NAMES = [
+    "Aarav Mehta", "Vihaan Rao", "Ishaan Nair", "Kabir Menon", "Reyansh Kapoor",
+    "Advaith Iyer", "Vivaan Joshi", "Arjun Bansal", "Sai Krishnan", "Devansh Gupta",
+    "Anika Deshmukh", "Diya Sengupta", "Myra Chatterjee", "Sara Kulkarni", "Kavya Tiwari",
+    "Rhea Chauhan", "Pari Malhotra", "Naina Aggarwal", "Ira Chatterjee", "Tara Siddiqui",
+    "Rohan Saxena", "Pranav Mishra", "Karthik Reddy", "Siddharth Jain", "Harshvardhan Goel",
+    "Nikhil Grover", "Yashwant Kumar", "Gaurav Shetty", "Manav Verma", "Tanishq Bhatia",
+    "Sneha Pillai", "Meera Hegde", "Nandini Dubey", "Simran Gill", "Shruti Pathak",
+    "Varun Khanna", "Ayushman Roy", "Rishabh Sinha", "Tejas Patel", "Omkar Kulkarni",
+]
+
+
+async def ensure_schema_migrations(conn) -> None:
+    """Idempotently add new columns (cohort) on existing Postgres/SQLite databases."""
+    dialect = conn.dialect.name
+    if dialect == "sqlite":
+        cols_res = await conn.execute(text("PRAGMA table_info(users)"))
+        existing_cols = {row[1] for row in cols_res.fetchall()}
+        if "cohort" not in existing_cols:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN cohort VARCHAR(20) NOT NULL DEFAULT 'REAL'"))
+    else:
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS cohort VARCHAR(20) NOT NULL DEFAULT 'REAL'"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_cohort ON users (cohort)"))
+
+
 async def seed_initial_data() -> None:
     async with AsyncSessionLocal() as db:
         existing_stocks_res = await db.execute(select(Stock))
@@ -111,6 +165,9 @@ async def seed_initial_data() -> None:
                     pe_ratio=d2(item["pe_ratio"]),
                     max_shares_per_user=settings.MAX_SHARES_PER_STOCK,
                 ))
+            await db.flush()
+            existing_stocks_res = await db.execute(select(Stock))
+            existing_stocks = {s.symbol: s for s in existing_stocks_res.scalars().all()}
         else:
             # Hydrate RAM prices from DB if restarting after crash
             for sym, st_row in existing_stocks.items():
@@ -130,142 +187,69 @@ async def seed_initial_data() -> None:
             market_engine.active_scenario_name = ms.active_scenario_name
             market_engine.active_headline = ms.active_headline
 
+        # Reclassify synthetic stress/verification accounts cleanly into DUMMY cohort
+        all_users_res = await db.execute(select(User))
+        existing_regs: set[str] = set()
+        for existing_u in all_users_res.scalars().all():
+            existing_regs.add(existing_u.registration_no)
+            if (
+                existing_u.registration_no.startswith("25STR")
+                or existing_u.registration_no.startswith("25DMY")
+                or existing_u.registration_no == "24BCE9001"
+                or existing_u.email.startswith("stress")
+                or existing_u.email.startswith("dummy")
+            ):
+                existing_u.cohort = "DUMMY"
+
+        # Seed 40 realistic Dummy Simulation Bots isolated in DUMMY cohort
+        if "25DMY0001" not in existing_regs and existing_stocks:
+            rng = random.Random(202604)
+            stock_syms = list(existing_stocks.keys())
+            for idx, full_name in enumerate(DUMMY_ROSTER_NAMES, start=1):
+                reg_no = f"25DMY{idx:04d}"
+                if reg_no in existing_regs:
+                    continue
+                email = f"sim.bot{idx:02d}@dummy.genesis2026.in"
+                dummy_user = User(
+                    email=email,
+                    registration_no=reg_no,
+                    full_name=full_name,
+                    role="PARTICIPANT",
+                    cohort="DUMMY",
+                    status="APPROVED",
+                    is_frozen=False,
+                )
+                db.add(dummy_user)
+                await db.flush()
+
+                pick_syms = rng.sample(stock_syms, k=min(3, len(stock_syms)))
+                cash_left = Decimal(str(settings.STARTING_CASH))
+                for sym in pick_syms:
+                    st_row = existing_stocks[sym]
+                    live_p = float(market_engine.stocks[sym].current_price) if sym in market_engine.stocks else float(st_row.current_price)
+                    qty = rng.randint(4, 18)
+                    cost = d2(live_p * qty)
+                    if cost <= cash_left * Decimal("0.32"):
+                        entry_p = d2(live_p * rng.uniform(0.92, 1.07))
+                        cash_left = d2(cash_left - d2(entry_p * Decimal(qty)))
+                        db.add(Holding(
+                            user_id=dummy_user.id,
+                            stock_id=st_row.id,
+                            symbol=sym,
+                            position_type="LONG",
+                            quantity=qty,
+                            avg_entry_price=entry_p,
+                        ))
+
+                db.add(Wallet(
+                    user_id=dummy_user.id,
+                    cash_balance=cash_left,
+                    collateral_locked=Decimal("0.00"),
+                    total_credited=d2(settings.STARTING_CASH),
+                    topup_count=0,
+                ))
+
         await db.commit()
-
-
-async def build_full_snapshot(db: AsyncSession) -> dict:
-    users_res = await db.execute(select(User))
-    wallets_res = await db.execute(select(Wallet))
-    holdings_res = await db.execute(select(Holding))
-
-    return {
-        "exported_at": datetime.now(timezone.utc).isoformat(),
-        "market_runtime": market_engine.export_runtime_state(),
-        "users": [
-            {
-                "id": u.id,
-                "email": u.email,
-                "registration_no": u.registration_no,
-                "full_name": u.full_name,
-                "role": u.role,
-                "status": u.status,
-                "is_frozen": u.is_frozen,
-            }
-            for u in users_res.scalars().all()
-        ],
-        "wallets": [
-            {
-                "id": w.id,
-                "user_id": w.user_id,
-                "cash_balance": str(w.cash_balance),
-                "collateral_locked": str(w.collateral_locked),
-                "total_credited": str(w.total_credited),
-                "topup_count": w.topup_count,
-            }
-            for w in wallets_res.scalars().all()
-        ],
-        "holdings": [
-            {
-                "id": h.id,
-                "user_id": h.user_id,
-                "stock_id": h.stock_id,
-                "symbol": h.symbol,
-                "position_type": h.position_type,
-                "quantity": h.quantity,
-                "avg_entry_price": str(h.avg_entry_price),
-            }
-            for h in holdings_res.scalars().all()
-        ],
-    }
-
-
-async def apply_snapshot_restore(db: AsyncSession, snap: dict) -> dict:
-    if "market_runtime" in snap:
-        market_engine.restore_runtime_state(snap["market_runtime"])
-
-    # Sync stocks table with restored prices
-    stocks_res = await db.execute(select(Stock))
-    stock_by_sym = {s.symbol: s for s in stocks_res.scalars().all()}
-    for sym, st in market_engine.stocks.items():
-        if sym in stock_by_sym:
-            stock_by_sym[sym].current_price = d2(st.current_price)
-            stock_by_sym[sym].anchor_price = d2(st.anchor_price)
-
-    # Upsert users
-    existing_users_res = await db.execute(select(User))
-    existing_users = {u.id: u for u in existing_users_res.scalars().all()}
-    for udata in snap.get("users", []):
-        if udata["id"] in existing_users:
-            u = existing_users[udata["id"]]
-            u.is_frozen = udata["is_frozen"]
-            u.status = udata["status"]
-        else:
-            db.add(User(
-                id=udata["id"],
-                email=udata["email"],
-                registration_no=udata["registration_no"],
-                full_name=udata.get("full_name", ""),
-                role=udata.get("role", "PARTICIPANT"),
-                status=udata.get("status", "APPROVED"),
-                is_frozen=udata.get("is_frozen", False),
-            ))
-
-    await db.flush()
-
-    # Upsert wallets
-    existing_wallets_res = await db.execute(select(Wallet))
-    existing_wallets = {w.user_id: w for w in existing_wallets_res.scalars().all()}
-    for wdata in snap.get("wallets", []):
-        if wdata["user_id"] in existing_wallets:
-            w = existing_wallets[wdata["user_id"]]
-            w.cash_balance = Decimal(wdata["cash_balance"])
-            w.collateral_locked = Decimal(wdata["collateral_locked"])
-            w.total_credited = Decimal(wdata["total_credited"])
-            w.topup_count = wdata["topup_count"]
-        else:
-            db.add(Wallet(
-                id=wdata["id"],
-                user_id=wdata["user_id"],
-                cash_balance=Decimal(wdata["cash_balance"]),
-                collateral_locked=Decimal(wdata["collateral_locked"]),
-                total_credited=Decimal(wdata["total_credited"]),
-                topup_count=wdata["topup_count"],
-            ))
-
-    # Replace holdings atomically
-    existing_holdings_res = await db.execute(select(Holding))
-    for eh in existing_holdings_res.scalars().all():
-        await db.delete(eh)
-    await db.flush()
-
-    for hdata in snap.get("holdings", []):
-        sym = hdata["symbol"]
-        mapped_stock_id = stock_by_sym[sym].id if sym in stock_by_sym else hdata["stock_id"]
-        db.add(Holding(
-            id=hdata["id"],
-            user_id=hdata["user_id"],
-            stock_id=mapped_stock_id,
-            symbol=sym,
-            position_type=hdata["position_type"],
-            quantity=int(hdata["quantity"]),
-            avg_entry_price=Decimal(hdata["avg_entry_price"]),
-        ))
-
-    ms_res = await db.execute(select(MarketSettings).where(MarketSettings.id == 1))
-    ms = ms_res.scalar_one_or_none()
-    if ms:
-        ms.is_market_open = market_engine.is_market_open
-        ms.ticks_enabled = market_engine.ticks_enabled
-        ms.active_era_id = market_engine.active_era_id
-        ms.active_scenario_name = market_engine.active_scenario_name
-        ms.active_headline = market_engine.active_headline
-
-    await db.commit()
-    return {
-        "restored_users": len(snap.get("users", [])),
-        "restored_holdings": len(snap.get("holdings", [])),
-        "seq": market_engine.seq,
-    }
 
 
 async def compute_admin_overview(db: AsyncSession) -> dict:
@@ -286,6 +270,12 @@ async def compute_admin_overview(db: AsyncSession) -> dict:
             exp["short_shares"] += h.quantity
 
     total_cash_circulation = Decimal("0.00")
+    real_count = 0
+    real_cash_pool = Decimal("0.00")
+    real_net_worth_pool = Decimal("0.00")
+    dummy_count = 0
+    dummy_cash_pool = Decimal("0.00")
+    dummy_net_worth_pool = Decimal("0.00")
     participants = []
 
     for u in users:
@@ -294,30 +284,56 @@ async def compute_admin_overview(db: AsyncSession) -> dict:
             continue
         cash = d2(w.cash_balance)
         collat = d2(w.collateral_locked)
+        total_credited = d2(w.total_credited)
         total_cash_circulation += cash + collat
 
         long_val = Decimal("0.00")
+        short_liab = Decimal("0.00")
         short_unrealized = Decimal("0.00")
+        long_unrealized = Decimal("0.00")
         u_holdings = holdings_by_user.get(u.id, [])
         for h in u_holdings:
             p = d2(market_engine.stocks[h.symbol].current_price) if h.symbol in market_engine.stocks else d2(h.avg_entry_price)
             if h.position_type == "LONG":
-                long_val += d2(Decimal(h.quantity) * p)
+                val = d2(Decimal(h.quantity) * p)
+                long_val += val
+                long_unrealized += d2((p - d2(h.avg_entry_price)) * Decimal(h.quantity))
             else:
+                short_liab += d2(Decimal(h.quantity) * p)
                 short_unrealized += d2((d2(h.avg_entry_price) - p) * Decimal(h.quantity))
 
+        unrealized_pnl = d2(long_unrealized + short_unrealized)
         net_worth = d2(cash + long_val + collat + short_unrealized)
+        net_pnl = d2(net_worth - total_credited)
+        net_return_pct = float(round((net_pnl / total_credited) * Decimal("100"), 2)) if total_credited > 0 else 0.0
+        cohort = getattr(u, "cohort", "REAL") or "REAL"
+
+        if cohort == "DUMMY":
+            dummy_count += 1
+            dummy_cash_pool += cash + collat
+            dummy_net_worth_pool += net_worth
+        else:
+            real_count += 1
+            real_cash_pool += cash + collat
+            real_net_worth_pool += net_worth
+
         participants.append({
             "user_id": u.id,
             "email": u.email,
             "registration_no": u.registration_no,
             "full_name": u.full_name,
+            "cohort": cohort,
             "is_frozen": u.is_frozen,
             "cash_balance": float(cash),
             "collateral_locked": float(collat),
-            "total_credited": float(w.total_credited),
+            "holdings_value": float(long_val),
+            "short_liability": float(short_liab),
+            "unrealized_pnl": float(unrealized_pnl),
+            "total_credited": float(total_credited),
             "topup_count": w.topup_count,
             "net_worth": float(net_worth),
+            "net_pnl": float(net_pnl),
+            "net_return_pct": net_return_pct,
             "positions_count": len(u_holdings),
         })
 
@@ -346,14 +362,27 @@ async def compute_admin_overview(db: AsyncSession) -> dict:
         "orders_per_sec": market_engine.last_orders_per_sec,
         "registered_count": len(participants),
         "total_cash_circulation": float(total_cash_circulation),
+        "cohort_summary": {
+            "real_count": real_count,
+            "real_cash_pool": float(real_cash_pool),
+            "real_net_worth_pool": float(real_net_worth_pool),
+            "dummy_count": dummy_count,
+            "dummy_cash_pool": float(dummy_cash_pool),
+            "dummy_net_worth_pool": float(dummy_net_worth_pool),
+        },
         "is_market_open": market_engine.is_market_open,
         "ticks_enabled": market_engine.ticks_enabled,
+        "volatility_regime": market_engine.volatility_regime,
+        "simulate_flow_enabled": market_engine.simulate_flow_enabled,
         "active_era_id": market_engine.active_era_id,
         "active_scenario_name": market_engine.active_scenario_name,
         "active_headline": market_engine.active_headline,
+        "event_feed": list(market_engine.event_feed),
+        "chart_markers": list(market_engine.chart_markers),
         "participants": participants,
         "top_exposure": top_stocks_exposure,
         "recent_logs": logs,
+        "backup_status": get_backup_status(),
         "eras": [
             {"id": e["id"], "order": e["order"], "name": e["name"], "severity": e["severity"]}
             for e in sorted(SCENARIOS_MAP.values(), key=lambda x: x["order"])
@@ -389,13 +418,8 @@ async def market_tick_loop() -> None:
         try:
             await asyncio.sleep(settings.TICK_INTERVAL_SECONDS)
             tick_count += 1
-            if tick_count % 2 == 0:
-                market_engine.step_jitter_if_enabled()
-            else:
-                # Advance candle bucket timestamp even between jitter steps
-                now_sec = int(time.time())
-                for st in market_engine.stocks.values():
-                    st._upsert_candle((now_sec // 5) * 5, st.current_price, 0)
+            # Tick market dynamics on every 1s cycle for lively, realistic Upstox/Zerodha candle action
+            market_engine.step_jitter_if_enabled()
 
             payload = market_engine.build_tick_payload("PRICE_TICK")
             await ws_manager.broadcast_market(payload)
@@ -412,45 +436,15 @@ async def market_tick_loop() -> None:
             logger.exception("Error in market_tick_loop: %s", exc)
 
 
-async def snapshot_exporter_loop() -> None:
-    Path(settings.BACKUP_DIR).mkdir(parents=True, exist_ok=True)
-    while True:
-        try:
-            await asyncio.sleep(settings.SNAPSHOT_INTERVAL_SECONDS)
-            async with AsyncSessionLocal() as db:
-                # Sync stock prices periodically to Postgres
-                stocks_res = await db.execute(select(Stock))
-                for srow in stocks_res.scalars().all():
-                    if srow.symbol in market_engine.stocks:
-                        srow.current_price = d2(market_engine.stocks[srow.symbol].current_price)
-                await db.commit()
-
-                snapshot = await build_full_snapshot(db)
-
-            # Atomic file write (.tmp -> replace) so backups are never corrupted mid-write
-            target_path = Path(settings.BACKUP_DIR) / "latest_snapshot.json"
-            tmp_path = Path(settings.BACKUP_DIR) / "latest_snapshot.json.tmp"
-            tmp_path.write_bytes(dumps_json(snapshot).encode("utf-8"))
-            os.replace(tmp_path, target_path)
-
-            if settings.STANDBY_SYNC_URL:
-                async with httpx.AsyncClient(timeout=3.0) as client:
-                    await client.post(
-                        f"{settings.STANDBY_SYNC_URL.rstrip('/')}/api/v1/system/restore",
-                        json=snapshot,
-                        headers={"X-Sync-Secret": settings.STANDBY_SYNC_SECRET},
-                    )
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            logger.warning("Snapshot exporter warning (non-fatal): %s", exc)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await ensure_schema_migrations(conn)
     await seed_initial_data()
+    recovered = await startup_auto_recover()
+    if recovered:
+        logger.info("Startup auto-recovery applied: %s", recovered)
 
     tick_task = asyncio.create_task(market_tick_loop())
     broadcaster_task = asyncio.create_task(coalesced_trade_broadcaster())
@@ -528,6 +522,7 @@ async def student_login(body: StudentLoginRequest, db: AsyncSession = Depends(ge
             registration_no=reg_no,
             full_name=name_val,
             role="PARTICIPANT",
+            cohort="REAL",
             status="APPROVED",
             is_frozen=False,
         )
@@ -599,14 +594,19 @@ async def bootstrap_terminal(user: User = Depends(get_current_user), db: AsyncSe
         "seq": market_engine.seq,
         "is_market_open": market_engine.is_market_open,
         "ticks_enabled": market_engine.ticks_enabled,
+        "volatility_regime": market_engine.volatility_regime,
+        "simulate_flow_enabled": market_engine.simulate_flow_enabled,
         "active_era_id": market_engine.active_era_id,
         "active_scenario_name": market_engine.active_scenario_name,
         "active_headline": market_engine.active_headline,
+        "event_feed": list(market_engine.event_feed),
+        "chart_markers": list(market_engine.chart_markers),
         "user": {
             "id": user.id,
             "email": user.email,
             "registration_no": user.registration_no,
             "full_name": user.full_name,
+            "cohort": getattr(user, "cohort", "REAL"),
             "is_frozen": user.is_frozen,
         },
         "portfolio": portfolio,
@@ -659,6 +659,101 @@ async def admin_overview(_admin=Depends(verify_admin), db: AsyncSession = Depend
     return await compute_admin_overview(db)
 
 
+@app.get("/api/v1/admin/tally")
+async def admin_cohort_tally(_admin=Depends(verify_admin), db: AsyncSession = Depends(get_db)):
+    """Separate official tally & ledger export for Real Participants vs Dummy Bots."""
+    overview = await compute_admin_overview(db)
+    real_tally = [p for p in overview["participants"] if p["cohort"] == "REAL"]
+    dummy_tally = [p for p in overview["participants"] if p["cohort"] == "DUMMY"]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": overview["cohort_summary"],
+        "real_tally": real_tally,
+        "dummy_tally": dummy_tally,
+    }
+
+
+@app.post("/api/v1/admin/users/import-real")
+async def admin_import_real_users(
+    body: BulkImportRealUsersRequest,
+    _admin=Depends(verify_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pre-register or upsert Real Participants directly into the isolated REAL cohort."""
+    created = 0
+    updated = 0
+    starting = d2(body.starting_cash)
+
+    for item in body.participants:
+        email = item.email.strip().lower()
+        reg_no = item.registration_no.strip().upper()
+        name_val = (item.full_name or reg_no).strip()
+
+        res_reg = await db.execute(select(User).where(User.registration_no == reg_no))
+        user = res_reg.scalar_one_or_none()
+        if user is None:
+            res_email = await db.execute(select(User).where(User.email == email))
+            user = res_email.scalar_one_or_none()
+
+        if user is not None:
+            user.email = email
+            user.registration_no = reg_no
+            if item.full_name:
+                user.full_name = name_val
+            user.cohort = "REAL"
+            user.status = "APPROVED"
+            updated += 1
+        else:
+            user = User(
+                email=email,
+                registration_no=reg_no,
+                full_name=name_val,
+                role="PARTICIPANT",
+                cohort="REAL",
+                status="APPROVED",
+                is_frozen=False,
+            )
+            db.add(user)
+            await db.flush()
+            db.add(Wallet(
+                user_id=user.id,
+                cash_balance=starting,
+                collateral_locked=Decimal("0.00"),
+                total_credited=starting,
+                topup_count=0,
+            ))
+            created += 1
+
+    db.add(AdminAuditLog(
+        action_type="IMPORT_REAL_USERS",
+        details=f"Imported/updated REAL cohort (created={created}, updated={updated})",
+    ))
+    await db.commit()
+    request_background_backup(checkpoint=True)
+    return {"status": "IMPORTED", "created": created, "updated": updated}
+
+
+@app.patch("/api/v1/admin/user/cohort")
+async def admin_set_user_cohort(
+    body: CohortUpdateRequest,
+    _admin=Depends(verify_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    clean_reg = body.registration_no.strip().upper()
+    res = await db.execute(select(User).where(User.registration_no == clean_reg))
+    user = res.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail=f"User {clean_reg} not found")
+    user.cohort = body.cohort
+    db.add(AdminAuditLog(
+        action_type="COHORT_UPDATE",
+        target_user_id=user.id,
+        details=f"Moved {clean_reg} to cohort={body.cohort}",
+    ))
+    await db.commit()
+    return {"registration_no": clean_reg, "cohort": user.cohort}
+
+
 @app.get("/api/v1/admin/user/{reg_no}")
 async def admin_user_lookup(reg_no: str, _admin=Depends(verify_admin), db: AsyncSession = Depends(get_db)):
     clean_reg = reg_no.strip().upper()
@@ -676,6 +771,8 @@ async def admin_user_lookup(reg_no: str, _admin=Depends(verify_admin), db: Async
             "id": user.id,
             "email": user.email,
             "registration_no": user.registration_no,
+            "full_name": user.full_name,
+            "cohort": getattr(user, "cohort", "REAL"),
             "is_frozen": user.is_frozen,
         },
         "portfolio": portfolio,
@@ -716,6 +813,7 @@ async def admin_topup(body: TopupRequest, _admin=Depends(verify_admin), db: Asyn
         details=f"Credited +₹{amt} to {clean_reg} ({body.note})",
     ))
     await db.commit()
+    request_background_backup(checkpoint=False)
 
     portfolio = await compute_user_portfolio(db, user.id)
     delivered = await ws_manager.send_to_user(user.id, {
@@ -787,6 +885,7 @@ async def admin_trigger_era(body: TriggerEraRequest, _admin=Depends(verify_admin
     liquidations = await run_short_squeeze_supervisor(db)
     payload = market_engine.build_tick_payload("ERA_SHOCK")
     await ws_manager.broadcast_market(payload)
+    request_background_backup(checkpoint=True)
 
     return {
         "status": "ERA_APPLIED",
@@ -809,6 +908,7 @@ async def admin_inject_whale(body: WhaleOrderRequest, _admin=Depends(verify_admi
     ))
     await db.commit()
     await ws_manager.broadcast_market(market_engine.build_tick_payload("WHALE_ALERT"))
+    request_background_backup(checkpoint=True)
     return res
 
 
@@ -851,7 +951,7 @@ async def admin_toggle_ticks(body: ToggleTicksRequest, _admin=Depends(verify_adm
 
 @app.post("/api/v1/admin/broadcast")
 async def admin_broadcast_headline(body: BroadcastHeadlineRequest, _admin=Depends(verify_admin), db: AsyncSession = Depends(get_db)):
-    market_engine.active_headline = body.headline
+    market_engine.add_broadcast_event(body.headline)
     ms_res = await db.execute(select(MarketSettings).where(MarketSettings.id == 1))
     ms = ms_res.scalar_one_or_none()
     if ms:
@@ -860,6 +960,18 @@ async def admin_broadcast_headline(body: BroadcastHeadlineRequest, _admin=Depend
     await db.commit()
     await ws_manager.broadcast_market(market_engine.build_tick_payload("GLOBAL_ALERT"))
     return {"active_headline": body.headline}
+
+
+@app.patch("/api/v1/admin/volatility")
+async def admin_set_volatility(body: VolatilityRegimeRequest, _admin=Depends(verify_admin), db: AsyncSession = Depends(get_db)):
+    market_engine.set_volatility_regime(body.regime, body.simulate_flow)
+    db.add(AdminAuditLog(
+        action_type="VOLATILITY_REGIME",
+        details=f"Set market regime={body.regime}, simulate_flow={body.simulate_flow}",
+    ))
+    await db.commit()
+    await ws_manager.broadcast_market(market_engine.build_tick_payload("PRICE_TICK"))
+    return {"volatility_regime": body.regime, "simulate_flow": body.simulate_flow}
 
 
 # ---------------------------------------------------------------------------
@@ -889,7 +1001,40 @@ async def system_restore(
     valid_admin = x_admin_secret == settings.ADMIN_SECRET_KEY
     if not (valid_sync or valid_admin):
         raise HTTPException(status_code=403, detail="Unauthorized restore access")
-    return await apply_snapshot_restore(db, snapshot)
+    res = await apply_snapshot_restore(db, snapshot)
+    await ws_manager.broadcast_market(market_engine.build_tick_payload("SNAPSHOT"))
+    return res
+
+
+@app.get("/api/v1/system/backup/status")
+async def system_backup_status(
+    x_sync_secret: str | None = Header(default=None, alias="X-Sync-Secret"),
+    x_admin_secret: str | None = Header(default=None, alias="X-Admin-Secret"),
+):
+    valid_sync = x_sync_secret == settings.STANDBY_SYNC_SECRET
+    valid_admin = x_admin_secret == settings.ADMIN_SECRET_KEY
+    if not (valid_sync or valid_admin):
+        raise HTTPException(status_code=403, detail="Unauthorized backup status access")
+    return get_backup_status()
+
+
+@app.post("/api/v1/system/backup/now")
+async def system_backup_now(_admin=Depends(verify_admin)):
+    result = await execute_full_backup_cycle(save_checkpoint=True)
+    return {"backup": result, "status": get_backup_status()}
+
+
+@app.post("/api/v1/system/backup/restore-supabase")
+async def system_restore_from_supabase(_admin=Depends(verify_admin), db: AsyncSession = Depends(get_db)):
+    snap = await pull_latest_from_supabase()
+    if not snap:
+        raise HTTPException(
+            status_code=404,
+            detail="No snapshot found in Supabase Vault (check SUPABASE_DB_URL / SUPABASE_URL & SUPABASE_SERVICE_KEY).",
+        )
+    res = await apply_snapshot_restore(db, snap)
+    await ws_manager.broadcast_market(market_engine.build_tick_payload("SNAPSHOT"))
+    return {"source": "SUPABASE_VAULT", **res}
 
 
 # ---------------------------------------------------------------------------

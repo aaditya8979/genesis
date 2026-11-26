@@ -28,6 +28,7 @@ class User(Base):
     registration_no: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
     full_name: Mapped[str] = mapped_column(String(150), nullable=False, default="")
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="PARTICIPANT")
+    cohort: Mapped[str] = mapped_column(String(20), nullable=False, default="REAL", index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="APPROVED")
     is_frozen: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -37,6 +38,7 @@ class User(Base):
 
     __table_args__ = (
         CheckConstraint("role IN ('ADMIN', 'PARTICIPANT')", name="chk_user_role"),
+        CheckConstraint("cohort IN ('REAL', 'DUMMY')", name="chk_user_cohort"),
         CheckConstraint("status IN ('PENDING', 'APPROVED', 'REJECTED')", name="chk_user_status"),
     )
 
