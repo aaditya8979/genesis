@@ -15,19 +15,14 @@ export function getRenderedTheme(): ResolvedTheme {
 export function toggleColorScheme(): ResolvedTheme {
   const current = getRenderedTheme();
   const target: ResolvedTheme = current === "dark" ? "light" : "dark";
-  const system = getSystemScheme();
   try {
-    if (target === system) {
-      localStorage.removeItem("color-scheme");
-    } else {
-      localStorage.setItem("color-scheme", target);
-    }
+    localStorage.setItem("color-scheme", target);
   } catch {
     // ignore storage errors
   }
   const metaEl = document.querySelector('meta[name="color-scheme"]');
   if (metaEl) {
-    metaEl.setAttribute("content", target === system ? "light dark" : target);
+    metaEl.setAttribute("content", target);
   }
   return target;
 }
@@ -52,7 +47,7 @@ export function useResolvedTheme(): ResolvedTheme {
     const onStorage = (e: StorageEvent) => {
       if (e.key === "color-scheme") {
         const meta = document.querySelector('meta[name="color-scheme"]');
-        if (meta) meta.setAttribute("content", e.newValue ?? "light dark");
+        if (meta) meta.setAttribute("content", e.newValue ?? "dark");
         sync();
       }
     };

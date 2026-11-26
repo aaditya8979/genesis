@@ -10,6 +10,21 @@ export interface CandleBar {
   volume: number;
 }
 
+export interface EventFeedItem {
+  id: string;
+  time_ms: number;
+  type: string;
+  title: string;
+  headline: string;
+}
+
+export interface ChartMarkerItem {
+  time: number;
+  label: string;
+  color: string;
+  symbol: string;
+}
+
 export interface StockTick {
   symbol: string;
   company_name?: string;

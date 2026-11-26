@@ -36,6 +36,15 @@ export function rotateGateway(): string {
   return getActiveHttpBase();
 }
 
+export class ApiError extends Error {
+  status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem("genesis_token");
   const adminSecret = localStorage.getItem("genesis_admin_secret");
@@ -47,7 +56,7 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   if (token && !headers["Authorization"]) {
     headers["Authorization"] = `Bearer ${token}`;
   }
-  if (adminSecret && path.includes("/admin") && !headers["X-Admin-Secret"]) {
+  if (adminSecret && (path.includes("/admin") || path.includes("/system/")) && !headers["X-Admin-Secret"]) {
     headers["X-Admin-Secret"] = adminSecret;
   }
 
@@ -79,7 +88,7 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
           rotateGateway();
           continue;
         }
-        throw new Error(detail);
+        throw new ApiError(detail, res.status);
       }
       return (await res.json()) as T;
     } catch (err: any) {
@@ -91,7 +100,7 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
       throw lastErr;
     }
   }
-  throw lastErr || new Error("All backend gateways unreachable");
+  throw lastErr || new ApiError("All backend gateways unreachable", 503);
 }
 
 // Local Ring Buffer cache for zero-blank-screen insurance on transient disconnects

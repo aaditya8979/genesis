@@ -4,22 +4,21 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['"Plus Jakarta Sans"', "system-ui", "-apple-system", "sans-serif"],
-        mono: ['"JetBrains Mono"', "ui-monospace", "SFMono-Regular", "monospace"],
+        sans: ['"IBM Plex Sans"', "-apple-system", "BlinkMacSystemFont", '"Trebuchet MS"', "sans-serif"],
+        mono: ['"IBM Plex Mono"', "ui-monospace", "SFMono-Regular", "monospace"],
       },
       colors: {
-        canvas: "#0B0E14",
-        surface: "#121721",
-        elevated: "#181E2B",
-        borderSubtle: "#232B3A",
-        upstoxGreen: "#00D09C",
-        upstoxRed: "#EB5B3C",
+        canvas: "#0F0F0F",
+        surface: "#171717",
+        elevated: "#1F1F1F",
+        borderSubtle: "#2A2A2A",
+        upstoxGreen: "#089981",
+        upstoxRed: "#F23645",
         accentGold: "#F59E0B",
-        textPrimary: "#F3F5F8",
-        textMuted: "#8A94A6",
+        textPrimary: "#E0E0E0",
+        textMuted: "#8A8A8A",
       },
     },
   },
   plugins: [],
 };
-

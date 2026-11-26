@@ -2,7 +2,9 @@ import { create } from "zustand";
 import { loadCandleRingCache, saveCandleRingCache } from "../lib/gateway";
 import {
   CandleBar,
+  ChartMarkerItem,
   ConnectionMode,
+  EventFeedItem,
   Portfolio,
   PriceScaleModeType,
   StockTick,
@@ -25,12 +27,14 @@ interface MarketStoreState {
   seq: number;
   isMarketOpen: boolean;
   ticksEnabled: boolean;
+  volatilityRegime: string;
   activeEraId: string;
   activeScenarioName: string;
   activeHeadline: string;
+  eventFeed: EventFeedItem[];
+  chartMarkers: ChartMarkerItem[];
   connectionMode: ConnectionMode;
   activeGatewayLabel: string;
-  eraMarkers: Array<{ time: number; label: string; color: string }>;
 
   // Interactive Chart & TradingView Controls
   preferredOrderTab: PreferredOrderSide;
@@ -57,7 +61,7 @@ interface MarketStoreState {
   setConnectionMode: (mode: ConnectionMode, label?: string) => void;
   hydrateBootstrap: (payload: any) => void;
   applyTickPayload: (payload: any) => void;
-  applyPortfolioUpdate: (portfolio: Portfolio, newTx?: TransactionItem) => void;
+  applyPortfolioUpdate: (portfolio: Portfolio, tx?: TransactionItem) => void;
   setFrozenStatus: (isFrozen: boolean) => void;
   resetSession: () => void;
 }
@@ -76,12 +80,14 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   seq: 0,
   isMarketOpen: true,
   ticksEnabled: true,
+  volatilityRegime: "DYNAMIC",
   activeEraId: "BASE",
   activeScenarioName: "Normal Trading — Round 0 Base",
   activeHeadline: "GENESIS 2026 Floor Open — ₹25,000 Virtual Capital Credited",
+  eventFeed: [],
+  chartMarkers: [],
   connectionMode: "CONNECTING",
   activeGatewayLabel: "PRIMARY",
-  eraMarkers: [],
 
   preferredOrderTab: "BUY",
   magnetCrosshair: false,
@@ -111,15 +117,17 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
 
   hydrateBootstrap: (payload) => {
     const stocksMap: Record<string, StockTick> = {};
-    const candlesMap: Record<string, CandleBar[]> = {};
+    const candlesMap: Record<string, CandleBar[]> = { ...get().candles };
     const order: string[] = [];
 
-    for (const item of payload.stocks || []) {
-      order.push(item.symbol);
-      const { candles, ...rest } = item;
-      stocksMap[item.symbol] = rest;
-      candlesMap[item.symbol] = candles || [];
+    for (const s of payload.stocks || []) {
+      order.push(s.symbol);
+      stocksMap[s.symbol] = s;
+      if (s.candles && s.candles.length > 0) {
+        candlesMap[s.symbol] = s.candles;
+      }
     }
+
     saveCandleRingCache(candlesMap);
 
     set((state) => ({
@@ -132,21 +140,22 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       seq: payload.seq ?? state.seq,
       isMarketOpen: payload.is_market_open ?? true,
       ticksEnabled: payload.ticks_enabled ?? true,
+      volatilityRegime: payload.volatility_regime ?? "DYNAMIC",
       activeEraId: payload.active_era_id ?? "BASE",
       activeScenarioName: payload.active_scenario_name ?? state.activeScenarioName,
       activeHeadline: payload.active_headline ?? state.activeHeadline,
+      eventFeed: payload.event_feed ?? state.eventFeed,
+      chartMarkers: payload.chart_markers ?? state.chartMarkers,
       selectedSymbol: stocksMap[state.selectedSymbol] ? state.selectedSymbol : order[0] || "TMND",
     }));
   },
 
   applyTickPayload: (payload) => {
     const state = get();
-    if (!payload?.stocks) return;
+    if (!payload || !payload.stocks) return;
 
     const nextStocks = { ...state.stocks };
     const nextCandles = { ...state.candles };
-    const isEraShock = payload.event === "ERA_SHOCK";
-    let shockTime: number | null = null;
 
     for (const tick of payload.stocks as StockTick[]) {
       const prev = nextStocks[tick.symbol];
@@ -155,12 +164,11 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       if (tick.candle) {
         const existing = nextCandles[tick.symbol] ? [...nextCandles[tick.symbol]] : [];
         const bar = { ...tick.candle };
-        if (shockTime === null) shockTime = bar.time;
         if (existing.length > 0 && existing[existing.length - 1].time === bar.time) {
           existing[existing.length - 1] = bar;
         } else if (existing.length === 0 || bar.time > existing[existing.length - 1].time) {
           existing.push(bar);
-          if (existing.length > 420) existing.shift();
+          if (existing.length > 480) existing.shift();
         }
         nextCandles[tick.symbol] = existing;
       }
@@ -174,8 +182,8 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       let totalUpnl = 0;
       const updatedHoldings = nextPortfolio.holdings.map((h) => {
         const livePrice = nextStocks[h.symbol]?.price ?? h.current_price;
-        const mktVal = Number((h.quantity * livePrice).toFixed(2));
-        const costBasis = h.quantity * h.avg_entry_price;
+        const mktVal = Number((livePrice * h.quantity).toFixed(2));
+        const costBasis = h.avg_entry_price * h.quantity;
         const upnl =
           h.position_type === "LONG"
             ? Number((mktVal - costBasis).toFixed(2))
@@ -194,8 +202,9 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
           pnl_pct: costBasis > 0 ? Number(((upnl / costBasis) * 100).toFixed(2)) : 0,
         };
       });
+
       const netWorth = Number(
-        (nextPortfolio.cash_balance + longVal + nextPortfolio.collateral_locked + shortUnrealized).toFixed(2)
+        (nextPortfolio.cash_balance + nextPortfolio.collateral_locked + longVal + shortUnrealized).toFixed(2)
       );
       nextPortfolio = {
         ...nextPortfolio,
@@ -207,21 +216,9 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       };
     }
 
-    if ((payload.seq ?? 0) % 10 === 0) {
+    if ((payload.seq ?? 0) % 5 === 0) {
       saveCandleRingCache(nextCandles);
     }
-
-    const nextMarkers =
-      isEraShock && shockTime
-        ? [
-            ...state.eraMarkers,
-            {
-              time: shockTime,
-              label: payload.active_era_id || "ERA",
-              color: "#F59E0B",
-            },
-          ]
-        : state.eraMarkers;
 
     set({
       stocks: nextStocks,
@@ -230,30 +227,26 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       seq: payload.seq ?? state.seq,
       isMarketOpen: payload.is_market_open ?? state.isMarketOpen,
       ticksEnabled: payload.ticks_enabled ?? state.ticksEnabled,
+      volatilityRegime: payload.volatility_regime ?? state.volatilityRegime,
       activeEraId: payload.active_era_id ?? state.activeEraId,
       activeScenarioName: payload.active_scenario_name ?? state.activeScenarioName,
       activeHeadline: payload.active_headline ?? state.activeHeadline,
-      eraMarkers: nextMarkers,
+      eventFeed: payload.event_feed ?? state.eventFeed,
+      chartMarkers: payload.chart_markers ?? state.chartMarkers,
     });
   },
 
-  applyPortfolioUpdate: (portfolio, newTx) =>
+  applyPortfolioUpdate: (portfolio, tx) =>
     set((s) => ({
       portfolio,
-      transactions: newTx ? [newTx, ...s.transactions].slice(0, 40) : s.transactions,
+      transactions: tx ? [tx, ...s.transactions].slice(0, 50) : s.transactions,
     })),
 
   setFrozenStatus: (isFrozen) =>
-    set((s) => ({
-      user: s.user ? { ...s.user, is_frozen: isFrozen } : null,
-    })),
+    set((s) => (s.user ? { user: { ...s.user, is_frozen: isFrozen } } : {})),
 
   resetSession: () => {
     localStorage.removeItem("genesis_token");
-    set({
-      user: null,
-      portfolio: null,
-      transactions: [],
-    });
+    set({ user: null, portfolio: null, transactions: [], connectionMode: "CONNECTING" });
   },
 }));
