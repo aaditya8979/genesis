@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 import { Toaster } from "sonner";
 import { LoginGate } from "./components/LoginGate";
 import { apiFetch } from "./lib/gateway";
+import { useResolvedTheme } from "./lib/theme";
 import { AdminPortal } from "./pages/AdminPortal";
 import { TradingTerminal } from "./pages/TradingTerminal";
 import { useMarketStore } from "./store/useMarketStore";
 
 export default function App() {
+  const theme = useResolvedTheme();
   const [route, setRoute] = useState<"LOGIN" | "TERMINAL" | "ADMIN">(() => {
     if (window.location.pathname.startsWith("/admin")) return "ADMIN";
     return localStorage.getItem("genesis_token") ? "TERMINAL" : "LOGIN";
@@ -38,25 +40,20 @@ export default function App() {
 
   return (
     <>
-      <Toaster theme="dark" position="top-right" richColors closeButton />
+      <Toaster theme={theme} position="top-right" richColors closeButton />
       {route === "ADMIN" ? (
-        <AdminPortal onBackTerminal={() => setRoute(localStorage.getItem("genesis_token") ? "TERMINAL" : "LOGIN")} />
-      ) : route === "LOGIN" ? (
-        <LoginGate
-          onSuccess={() => setRoute("TERMINAL")}
-          onGoAdmin={() => setRoute("ADMIN")}
+        <AdminPortal
+          onBackTerminal={() => setRoute(localStorage.getItem("genesis_token") ? "TERMINAL" : "LOGIN")}
         />
+      ) : route === "LOGIN" ? (
+        <LoginGate onSuccess={() => setRoute("TERMINAL")} onGoAdmin={() => setRoute("ADMIN")} />
       ) : hydrating ? (
-        <div className="min-h-[100dvh] bg-[#0B0E14] text-[#8A94A6] flex items-center justify-center font-mono text-sm">
-          Hydrating wallet & live candles from GENESIS Floor...
+        <div className="min-h-[100dvh] bg-[var(--tv-bg)] text-[var(--tv-muted)] flex items-center justify-center font-mono text-sm">
+          Hydrating wallet &amp; live candles from GENESIS Floor...
         </div>
       ) : (
-        <TradingTerminal
-          onLogout={() => setRoute("LOGIN")}
-          onGoAdmin={() => setRoute("ADMIN")}
-        />
+        <TradingTerminal onLogout={() => setRoute("LOGIN")} onGoAdmin={() => setRoute("ADMIN")} />
       )}
     </>
   );
 }
-
