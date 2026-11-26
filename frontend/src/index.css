@@ -1,0 +1,98 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --scrollbar-track: #0b0e14;
+  --scrollbar-thumb: #2c3649;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: thin;
+}
+
+@supports not (scrollbar-color: auto) {
+  .scroller {
+    scrollbar-width: auto;
+  }
+  .scroller::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scroller::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 9999px;
+  }
+  .scroller::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
+html,
+body,
+#root {
+  block-size: 100%;
+  min-block-size: 100dvh;
+  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Form validation feedback strictly after user interaction */
+input:user-invalid {
+  border-color: #eb5b3c;
+  box-shadow: 0 0 0 1px rgba(235, 91, 60, 0.35);
+}
+
+input:user-invalid + .field-error {
+  display: block;
+}
+
+.field-error {
+  display: none;
+}
+
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+.scroller {
+  overscroll-behavior: contain;
+}
+
+/* Micro-flash animations on live price ticks */
+@keyframes flashGreen {
+  0% {
+    background-color: rgba(0, 208, 156, 0.28);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@keyframes flashRed {
+  0% {
+    background-color: rgba(235, 91, 60, 0.28);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.tick-flash-up {
+  animation: flashGreen 0.45s ease-out;
+}
+
+.tick-flash-down {
+  animation: flashRed 0.45s ease-out;
+}
+
