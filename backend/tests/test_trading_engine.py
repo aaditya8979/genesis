@@ -251,3 +251,4 @@ async def test_concurrent_double_spend_prevention():
 
         port = (await ac.get("/api/v1/portfolio/me", headers=headers)).json()
         assert port["cash_balance"] >= 0.0
+

@@ -1,4 +1,4 @@
-"""1,000-Concurrent-User Stress Benchmark (WebSockets + Burst Orders + Era Shock)."""
+"""1,000-Concurrent-User Stress Benchmark (WebSockets + Burst Orders + Era Shock + Polling Fallback)."""
 
 import asyncio
 import json
@@ -10,25 +10,30 @@ import uuid
 import httpx
 import websockets
 
-BASE_HTTP = os.getenv("GENESIS_HTTP_URL", "http://127.0.0.1:8000")
-BASE_WS = os.getenv("GENESIS_WS_URL", "ws://127.0.0.1:8000/ws/market")
+BASE_HTTP = os.getenv("GENESIS_HTTP_URL", "http://127.0.0.1:8080")
+BASE_WS = os.getenv("GENESIS_WS_URL", "ws://127.0.0.1:8080/ws/market")
 ADMIN_SECRET = os.getenv("ADMIN_SECRET_KEY", "genesis_admin_master_2026")
 TARGET_USERS = int(os.getenv("STRESS_USERS", "1000"))
 
 
-async def spawn_ws_client(idx: int, connected_event: asyncio.Event, shock_latencies: list[float], errors: list[str], stop_event: asyncio.Event):
+async def spawn_ws_client(
+    idx: int,
+    connected_event: asyncio.Event,
+    shock_latencies: list[float],
+    errors: list[str],
+    stop_event: asyncio.Event,
+):
     url = f"{BASE_WS}?token=stress-{idx}"
     try:
-        async with websockets.connect(url, open_timeout=15, ping_interval=None) as ws:
-            # Read initial SNAPSHOT
-            await ws.recv()
+        async with websockets.connect(url, open_timeout=15, ping_interval=None, max_size=2**22) as ws:
+            await ws.recv()  # initial SNAPSHOT
             connected_event.set()
             while not stop_event.is_set():
                 try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                    raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
                     msg = json.loads(raw)
                     if msg.get("event") == "ERA_SHOCK":
-                        shock_latencies.append(time.time() * 1000.0 - msg["server_time_ms"])
+                        shock_latencies.append(max(0.0, time.time() * 1000.0 - msg["server_time_ms"]))
                 except asyncio.TimeoutError:
                     await ws.send('{"type":"ping"}')
     except Exception as exc:
@@ -45,7 +50,7 @@ async def run_stress():
     shock_latencies: list[float] = []
     ws_errors: list[str] = []
 
-    # 1. Ramp 1,000 WebSockets smoothly in batches of 100 (mimicking jittered classroom join)
+    # 1. Ramp 1,000 WebSockets cleanly in batches of 100
     tasks = []
     for batch_start in range(0, TARGET_USERS, 100):
         for i in range(batch_start, min(batch_start + 100, TARGET_USERS)):
@@ -62,8 +67,9 @@ async def run_stress():
     # 2. Register 200 active traders and blast 400 concurrent BUY orders
     order_latencies_ms: list[float] = []
     order_500s: list[int] = []
+    limits = httpx.Limits(max_connections=250, max_keepalive_connections=100)
 
-    async with httpx.AsyncClient(base_url=BASE_HTTP, timeout=15.0) as client:
+    async with httpx.AsyncClient(base_url=BASE_HTTP, timeout=15.0, limits=limits) as client:
         async def login_and_trade(idx: int):
             res = await client.post("/api/v1/auth/login", json={
                 "email": f"stress{idx}@vitbhopal.ac.in",
@@ -89,13 +95,22 @@ async def run_stress():
 
         await asyncio.gather(*(login_and_trade(i) for i in range(200)))
 
-        # 3. Trigger Atomic Era Shock and measure broadcast fan-out across all 1,000 sockets
-        await client.post(
+        # Let any trailing coalesced broadcast flush, then trigger Era Shock
+        await asyncio.sleep(0.5)
+        shock_res = await client.post(
             "/api/v1/admin/scenario/trigger",
             headers={"X-Admin-Secret": ADMIN_SECRET},
             json={"era_id": "ERA_1_DOT_COM"},
         )
-        await asyncio.sleep(1.5)
+        assert shock_res.status_code == 200
+        await asyncio.sleep(2.5)
+
+        # 4. Verify HTTP Polling fallback & Snapshot export endpoint
+        poll_res = await client.get("/api/v1/market/ticks?since_seq=0")
+        assert poll_res.status_code == 200 and len(poll_res.json()["stocks"]) == 30
+
+        snap_res = await client.get("/api/v1/system/snapshot", headers={"X-Admin-Secret": ADMIN_SECRET})
+        assert snap_res.status_code == 200 and len(snap_res.json()["users"]) >= 200
 
         health = (await client.get("/health")).json()
 
@@ -104,13 +119,15 @@ async def run_stress():
 
     p50 = round(statistics.median(order_latencies_ms), 2) if order_latencies_ms else 0.0
     p99 = round(sorted(order_latencies_ms)[int(len(order_latencies_ms) * 0.99)], 2) if order_latencies_ms else 0.0
+    fan_p50 = round(statistics.median(shock_latencies), 2) if shock_latencies else 0.0
 
     print(f"[ORDERS] {len(order_latencies_ms)} orders processed | p50={p50}ms | p99={p99}ms | HTTP 5xx={len(order_500s)}")
-    print(f"[ERA FANOUT] {len(shock_latencies)}/{active_ws} clients received ERA_SHOCK")
+    print(f"[ERA FANOUT] {len(shock_latencies)}/{active_ws} clients received ERA_SHOCK (median delay ~{fan_p50}ms)")
     print(f"[HEALTH] {health}")
 
     assert len(order_500s) == 0, f"Detected HTTP 5xx errors: {order_500s}"
     assert active_ws >= int(TARGET_USERS * 0.98), f"Only {active_ws} WS connected"
+    assert len(shock_latencies) >= int(active_ws * 0.95), f"Too few clients received ERA_SHOCK: {len(shock_latencies)}"
 
 
 if __name__ == "__main__":
