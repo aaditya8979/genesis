@@ -58,29 +58,30 @@ class StockRuntimeState:
     candles: deque = field(default_factory=lambda: deque(maxlen=360))
 
     def seed_history(self, now_sec: int) -> None:
-        """Seed 36 realistic 5s bars ending at current timestamp so charts look alive immediately."""
+        """Seed 360 realistic 5s bars (30 mins) ending at current_price so 5s/15s/30s/1m charts all render full density immediately."""
         if self.candles:
             return
         cur_bucket = align_bucket(now_sec)
         p = self.base_price
         rng = random.Random(hash(self.symbol) & 0xFFFFFFFF)
         bars: list[CandleBar] = []
-        # Walk backwards then forward so final close matches base_price cleanly
+        bar_count = 360
+        # Walk backwards then forward so final close matches current_price cleanly
         walk_prices = [p]
-        for _ in range(36):
-            step = rng.gauss(0, self.volatility * 1.4)
+        for _ in range(bar_count):
+            step = rng.gauss(0, self.volatility * 1.15)
             p = max(settings.PRICE_FLOOR, round(p * (1.0 + step), 2))
             walk_prices.append(p)
         walk_prices.reverse()
 
-        for idx in range(36):
-            ts = cur_bucket - (36 - idx) * CANDLE_INTERVAL_SEC
+        for idx in range(bar_count):
+            ts = cur_bucket - (bar_count - idx) * CANDLE_INTERVAL_SEC
             o = walk_prices[idx]
-            c = walk_prices[idx + 1] if idx < 35 else self.current_price
-            spread = max(0.25, abs(c - o) * 0.4 + o * self.volatility)
+            c = walk_prices[idx + 1] if idx < bar_count - 1 else self.current_price
+            spread = max(0.20, abs(c - o) * 0.45 + o * self.volatility)
             h = round(max(o, c) + rng.uniform(0.05, spread), 2)
             l = max(settings.PRICE_FLOOR, round(min(o, c) - rng.uniform(0.05, spread), 2))
-            vol = rng.randint(40, 280)
+            vol = rng.randint(45, 320)
             bars.append(CandleBar(time=ts, open=o, high=h, low=l, close=c, volume=vol))
 
         self.candles.extend(bars)
