@@ -297,16 +297,16 @@ async def compute_admin_overview(db: AsyncSession) -> dict:
         total_cash_circulation += cash + collat
 
         long_val = Decimal("0.00")
-        short_liab = Decimal("0.00")
+        short_unrealized = Decimal("0.00")
         u_holdings = holdings_by_user.get(u.id, [])
         for h in u_holdings:
             p = d2(market_engine.stocks[h.symbol].current_price) if h.symbol in market_engine.stocks else d2(h.avg_entry_price)
             if h.position_type == "LONG":
                 long_val += d2(Decimal(h.quantity) * p)
             else:
-                short_liab += d2(Decimal(h.quantity) * p)
+                short_unrealized += d2((d2(h.avg_entry_price) - p) * Decimal(h.quantity))
 
-        net_worth = d2(cash + long_val + collat - short_liab)
+        net_worth = d2(cash + long_val + collat + short_unrealized)
         participants.append({
             "user_id": u.id,
             "email": u.email,
@@ -362,8 +362,27 @@ async def compute_admin_overview(db: AsyncSession) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Background Tasks: Tick Loop & Warm-Standby Snapshot Exporter
+# Background Tasks: Coalesced Broadcaster, Tick Loop & Warm-Standby Exporter
 # ---------------------------------------------------------------------------
+_trade_dirty_event = asyncio.Event()
+
+
+async def coalesced_trade_broadcaster() -> None:
+    """Coalesce rapid order bursts (e.g. 400 trades in 1s) into at most 1 broadcast every 150ms."""
+    while True:
+        try:
+            await _trade_dirty_event.wait()
+            # Small batch window to coalesce simultaneous fills
+            await asyncio.sleep(0.15)
+            _trade_dirty_event.clear()
+            payload = market_engine.build_tick_payload("PRICE_TICK")
+            await ws_manager.broadcast_market(payload)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.exception("Error in coalesced_trade_broadcaster: %s", exc)
+
+
 async def market_tick_loop() -> None:
     tick_count = 0
     while True:
@@ -434,14 +453,16 @@ async def lifespan(app: FastAPI):
     await seed_initial_data()
 
     tick_task = asyncio.create_task(market_tick_loop())
+    broadcaster_task = asyncio.create_task(coalesced_trade_broadcaster())
     snap_task = asyncio.create_task(snapshot_exporter_loop())
     logger.info("GENESIS 2026 Exchange Engine online (30 equities, 10 eras, single-worker RAM mode)")
     try:
         yield
     finally:
         tick_task.cancel()
+        broadcaster_task.cancel()
         snap_task.cancel()
-        await asyncio.gather(tick_task, snap_task, return_exceptions=True)
+        await asyncio.gather(tick_task, broadcaster_task, snap_task, return_exceptions=True)
 
 
 app = FastAPI(
@@ -620,8 +641,8 @@ async def place_order(
         quantity=body.quantity,
         client_order_id=body.client_order_id,
     )
-    # Broadcast updated price immediately so crowd buying surge appears live
-    asyncio.create_task(ws_manager.broadcast_market(market_engine.build_tick_payload("PRICE_TICK")))
+    # Signal coalesced broadcaster instead of spawning N broadcasts for N simultaneous orders
+    _trade_dirty_event.set()
     return result
 
 
