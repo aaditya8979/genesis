@@ -1,6 +1,17 @@
 import { create } from "zustand";
 import { loadCandleRingCache, saveCandleRingCache } from "../lib/gateway";
-import { CandleBar, ConnectionMode, Portfolio, StockTick, StudentUser, TransactionItem } from "../lib/types";
+import {
+  CandleBar,
+  ConnectionMode,
+  Portfolio,
+  PriceScaleModeType,
+  StockTick,
+  StudentUser,
+  TimeframeSec,
+  TransactionItem,
+} from "../lib/types";
+
+export type PreferredOrderSide = "BUY" | "SELL" | "SHORT" | "COVER";
 
 interface MarketStoreState {
   user: StudentUser | null;
@@ -10,7 +21,7 @@ interface MarketStoreState {
   stocks: Record<string, StockTick>;
   candles: Record<string, CandleBar[]>;
   selectedSymbol: string;
-  timeframeSec: 5 | 15 | 60;
+  timeframeSec: TimeframeSec;
   seq: number;
   isMarketOpen: boolean;
   ticksEnabled: boolean;
@@ -21,8 +32,28 @@ interface MarketStoreState {
   activeGatewayLabel: string;
   eraMarkers: Array<{ time: number; label: string; color: string }>;
 
+  // Interactive Chart & TradingView Controls
+  preferredOrderTab: PreferredOrderSide;
+  magnetCrosshair: boolean;
+  showEntryLine: boolean;
+  showEraMarkers: boolean;
+  autoScale: boolean;
+  priceScaleMode: PriceScaleModeType;
+  chartCommandNonce: number;
+  chartCommand: "FIT" | "ZOOM_IN" | "ZOOM_OUT" | "RANGE_10M" | "RANGE_30M" | "RANGE_ALL" | null;
+
   setSelectedSymbol: (symbol: string) => void;
-  setTimeframeSec: (tf: 5 | 15 | 60) => void;
+  setTimeframeSec: (tf: TimeframeSec) => void;
+  setPreferredOrderTab: (tab: PreferredOrderSide) => void;
+  toggleMagnetCrosshair: () => void;
+  toggleEntryLine: () => void;
+  toggleEraMarkers: () => void;
+  setAutoScale: (val: boolean) => void;
+  setPriceScaleMode: (mode: PriceScaleModeType) => void;
+  dispatchChartCommand: (
+    cmd: "FIT" | "ZOOM_IN" | "ZOOM_OUT" | "RANGE_10M" | "RANGE_30M" | "RANGE_ALL"
+  ) => void;
+
   setConnectionMode: (mode: ConnectionMode, label?: string) => void;
   hydrateBootstrap: (payload: any) => void;
   applyTickPayload: (payload: any) => void;
@@ -41,7 +72,7 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   stocks: {},
   candles: cachedCandles,
   selectedSymbol: "TMND",
-  timeframeSec: 5,
+  timeframeSec: 15,
   seq: 0,
   isMarketOpen: true,
   ticksEnabled: true,
@@ -52,8 +83,26 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   activeGatewayLabel: "PRIMARY",
   eraMarkers: [],
 
+  preferredOrderTab: "BUY",
+  magnetCrosshair: false,
+  showEntryLine: true,
+  showEraMarkers: true,
+  autoScale: true,
+  priceScaleMode: "NORMAL",
+  chartCommandNonce: 0,
+  chartCommand: null,
+
   setSelectedSymbol: (symbol) => set({ selectedSymbol: symbol }),
   setTimeframeSec: (tf) => set({ timeframeSec: tf }),
+  setPreferredOrderTab: (tab) => set({ preferredOrderTab: tab }),
+  toggleMagnetCrosshair: () => set((s) => ({ magnetCrosshair: !s.magnetCrosshair })),
+  toggleEntryLine: () => set((s) => ({ showEntryLine: !s.showEntryLine })),
+  toggleEraMarkers: () => set((s) => ({ showEraMarkers: !s.showEraMarkers })),
+  setAutoScale: (val) => set({ autoScale: val }),
+  setPriceScaleMode: (mode) => set({ priceScaleMode: mode }),
+  dispatchChartCommand: (cmd) =>
+    set((s) => ({ chartCommand: cmd, chartCommandNonce: s.chartCommandNonce + 1 })),
+
   setConnectionMode: (mode, label) =>
     set((s) => ({
       connectionMode: mode,
@@ -105,19 +154,18 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
 
       if (tick.candle) {
         const existing = nextCandles[tick.symbol] ? [...nextCandles[tick.symbol]] : [];
-        const bar = tick.candle;
+        const bar = { ...tick.candle };
         if (shockTime === null) shockTime = bar.time;
         if (existing.length > 0 && existing[existing.length - 1].time === bar.time) {
           existing[existing.length - 1] = bar;
         } else if (existing.length === 0 || bar.time > existing[existing.length - 1].time) {
           existing.push(bar);
-          if (existing.length > 360) existing.shift();
+          if (existing.length > 420) existing.shift();
         }
         nextCandles[tick.symbol] = existing;
       }
     }
 
-    // Recompute live unrealized P&L & net worth on client every tick with zero extra API calls
     let nextPortfolio = state.portfolio;
     if (nextPortfolio) {
       let longVal = 0;

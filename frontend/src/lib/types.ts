@@ -1,3 +1,6 @@
+export type TimeframeSec = 5 | 15 | 30 | 60;
+export type PriceScaleModeType = "NORMAL" | "LOG" | "PERCENT";
+
 export interface CandleBar {
   time: number;
   open: number;
@@ -68,4 +71,3 @@ export interface StudentUser {
 }
 
 export type ConnectionMode = "CONNECTING" | "LIVE_WSS" | "POLLING_FALLBACK" | "RECONNECTING";
-
