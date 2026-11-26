@@ -3,10 +3,65 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: dark;
-  --scrollbar-track: #0b0e14;
-  --scrollbar-thumb: #2c3649;
-  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  color-scheme: light dark;
+
+  --tv-bg-light: #ffffff;
+  --tv-bg-dark: #131722;
+  --tv-surface-light: #f8fafd;
+  --tv-surface-dark: #1e222d;
+  --tv-hover-light: #f0f3fa;
+  --tv-hover-dark: #2a2e39;
+  --tv-border-light: #e0e3eb;
+  --tv-border-dark: #2a2e39;
+  --tv-text-light: #131722;
+  --tv-text-dark: #d1d4dc;
+  --tv-muted-light: #6a6d78;
+  --tv-muted-dark: #787b86;
+
+  --tv-bg: var(--tv-bg-light);
+  --tv-surface: var(--tv-surface-light);
+  --tv-hover: var(--tv-hover-light);
+  --tv-border: var(--tv-border-light);
+  --tv-text: var(--tv-text-light);
+  --tv-muted: var(--tv-muted-light);
+  --tv-scrollbar-track: #f1f3f6;
+  --tv-scrollbar-thumb: #c1c5cf;
+
+  --tv-green: #089981;
+  --tv-red: #f23645;
+  --tv-blue: #2962ff;
+
+  @media (prefers-color-scheme: dark) {
+    --tv-bg: var(--tv-bg-dark);
+    --tv-surface: var(--tv-surface-dark);
+    --tv-hover: var(--tv-hover-dark);
+    --tv-border: var(--tv-border-dark);
+    --tv-text: var(--tv-text-dark);
+    --tv-muted: var(--tv-muted-dark);
+    --tv-scrollbar-track: #131722;
+    --tv-scrollbar-thumb: #363a45;
+  }
+
+  @supports (color: light-dark(white, black)) {
+    --tv-bg: light-dark(var(--tv-bg-light), var(--tv-bg-dark));
+    --tv-surface: light-dark(var(--tv-surface-light), var(--tv-surface-dark));
+    --tv-hover: light-dark(var(--tv-hover-light), var(--tv-hover-dark));
+    --tv-border: light-dark(var(--tv-border-light), var(--tv-border-dark));
+    --tv-text: light-dark(var(--tv-text-light), var(--tv-text-dark));
+    --tv-muted: light-dark(var(--tv-muted-light), var(--tv-muted-dark));
+    --tv-scrollbar-track: light-dark(#f1f3f6, #131722);
+    --tv-scrollbar-thumb: light-dark(#c1c5cf, #363a45);
+  }
+
+  &:has(> head > meta[name="color-scheme"][content="dark"]) {
+    color-scheme: dark;
+  }
+  &:has(> head > meta[name="color-scheme"][content="light"]) {
+    color-scheme: light;
+  }
+
+  accent-color: var(--tv-blue);
+  scrollbar-color: var(--tv-scrollbar-thumb) var(--tv-scrollbar-track);
   scrollbar-width: thin;
 }
 
@@ -19,11 +74,11 @@
     height: 6px;
   }
   .scroller::-webkit-scrollbar-thumb {
-    background: var(--scrollbar-thumb);
+    background: var(--tv-scrollbar-thumb);
     border-radius: 9999px;
   }
   .scroller::-webkit-scrollbar-track {
-    background: var(--scrollbar-track);
+    background: var(--tv-scrollbar-track);
   }
 }
 
@@ -32,7 +87,13 @@ body,
 #root {
   block-size: 100%;
   min-block-size: 100dvh;
-  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+  background-color: var(--tv-bg);
+  color: var(--tv-text);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Trebuchet MS", sans-serif;
+}
+
+.font-mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .tabular-nums {
@@ -41,8 +102,8 @@ body,
 
 /* Form validation feedback strictly after user interaction */
 input:user-invalid {
-  border-color: #eb5b3c;
-  box-shadow: 0 0 0 1px rgba(235, 91, 60, 0.35);
+  border-color: var(--tv-red);
+  box-shadow: 0 0 0 1px rgba(242, 54, 69, 0.35);
 }
 
 input:user-invalid + .field-error {
@@ -69,19 +130,35 @@ input:user-invalid + .field-error {
   overscroll-behavior: contain;
 }
 
+/* Tab underline via pseudo-element per accessibility standards */
+[role="tab"] {
+  position: relative;
+}
+
+[role="tab"][aria-selected="true"] {
+  color: var(--tv-text);
+}
+
+[role="tab"][aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  border-block-end: 2px solid var(--tv-blue);
+}
+
 /* Micro-flash animations on live price ticks */
-@keyframes flashGreen {
+@keyframes tvFlashGreen {
   0% {
-    background-color: rgba(0, 208, 156, 0.28);
+    background-color: rgba(8, 153, 129, 0.24);
   }
   100% {
     background-color: transparent;
   }
 }
 
-@keyframes flashRed {
+@keyframes tvFlashRed {
   0% {
-    background-color: rgba(235, 91, 60, 0.28);
+    background-color: rgba(242, 54, 69, 0.24);
   }
   100% {
     background-color: transparent;
@@ -89,10 +166,9 @@ input:user-invalid + .field-error {
 }
 
 .tick-flash-up {
-  animation: flashGreen 0.45s ease-out;
+  animation: tvFlashGreen 0.4s ease-out;
 }
 
 .tick-flash-down {
-  animation: flashRed 0.45s ease-out;
+  animation: tvFlashRed 0.4s ease-out;
 }
-
