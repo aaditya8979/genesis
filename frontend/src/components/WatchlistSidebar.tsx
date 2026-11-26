@@ -91,7 +91,7 @@ export function WatchlistSidebar() {
 
           return (
             <button
-              key={`${st.symbol}-${st.tick_delta_pct}`}
+              key={st.symbol}
               type="button"
               onClick={() => setSelectedSymbol(st.symbol)}
               className={`w-full px-3 py-1.5 grid grid-cols-[1fr_70px_62px_62px] items-center text-left transition-colors ${flashClass} ${

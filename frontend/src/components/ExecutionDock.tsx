@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Lock, ShieldAlert } from "lucide-react";
+import { AlertTriangle, Lock, ShieldAlert, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { apiFetch } from "../lib/gateway";
 import { getSymbolBadgeColor } from "../lib/theme";
@@ -22,7 +22,6 @@ export function ExecutionDock() {
   const activeScenarioName = useMarketStore((s) => s.activeScenarioName);
   const applyPortfolioUpdate = useMarketStore((s) => s.applyPortfolioUpdate);
 
-  // Sync when clicking chart's floating SELL / BUY quick buttons
   useEffect(() => {
     setTab(preferredOrderTab);
     setPanelTab("TRADE");
@@ -105,9 +104,9 @@ export function ExecutionDock() {
 
   return (
     <section className="bg-[var(--tv-bg)] border-t border-[var(--tv-border)] flex flex-col min-w-0">
-      {/* TradingView Style Symbol Inspector Header */}
+      {/* TradingView Symbol Inspector Header */}
       <div className="px-3.5 pt-3 pb-2.5 border-b border-[var(--tv-border)]">
-        <div className="flex items-start justify-between gap-2 mb-2">
+        <div className="flex items-start justify-between gap-2 mb-1.5">
           <div className="flex items-center gap-2 min-w-0">
             <span
               className="w-6 h-6 rounded-full text-[10px] font-bold text-white flex items-center justify-center shrink-0"
@@ -126,7 +125,7 @@ export function ExecutionDock() {
           </div>
         </div>
 
-        {/* Large Bold TradingView Price Display */}
+        {/* Bold TradingView Price Display */}
         <div className="flex items-baseline gap-2 flex-wrap">
           <span className="font-mono text-2xl font-bold text-[var(--tv-text)] tabular-nums tracking-tight">
             {price.toFixed(2)}
@@ -143,7 +142,7 @@ export function ExecutionDock() {
           </span>
         </div>
 
-        {/* 30s Crowd Volume Split Meter (Styled after TradingView Volume Comparison Bar) */}
+        {/* 30s Crowd Volume Split Meter */}
         <div className="mt-2.5">
           <div className="flex items-center justify-between text-[10px] font-mono tabular-nums mb-1">
             <span className="text-[#089981] font-semibold">
@@ -186,7 +185,7 @@ export function ExecutionDock() {
           onClick={() => setPanelTab("STATS")}
           className="py-2 text-center text-[var(--tv-muted)] hover:text-[var(--tv-text)] transition-colors"
         >
-          Key Stats & Rules
+          Key Stats &amp; Facts
         </button>
       </div>
 
@@ -309,18 +308,24 @@ export function ExecutionDock() {
         )}
       </div>
 
-      {/* Panel 2: Key Stats & Position Guardrails */}
+      {/* Panel 2: TradingView Key Facts Card & Key Stats */}
       <div
         role="tabpanel"
         aria-labelledby="tab-stats"
         hidden={panelTab !== "STATS"}
         className="p-3.5 space-y-2.5 text-xs"
       >
-        <div className="p-2.5 rounded bg-[var(--tv-surface)] border border-[var(--tv-border)]">
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-[#2962FF] mb-1">
-            Active Macro Regime
+        <div className="p-3 rounded-lg bg-[#2962FF]/10 border border-[#2962FF]/25 space-y-1">
+          <div className="text-[11px] font-semibold text-[#2962FF] flex items-center gap-1.5">
+            <Sparkles className="w-3.5 h-3.5" /> Key facts
           </div>
-          <div className="text-[11px] font-medium text-[var(--tv-text)]">{activeScenarioName}</div>
+          <p className="text-[11px] leading-relaxed text-[var(--tv-text)]">
+            {stock?.company_name || selectedSymbol} trades at{" "}
+            <strong className="font-mono">₹{price.toFixed(2)}</strong> under{" "}
+            <strong>{activeScenarioName}</strong>. 30s order flow sits at{" "}
+            <strong className="font-mono text-[#089981]">{buyPct.toFixed(0)}% BUY</strong> vs{" "}
+            <strong className="font-mono text-[#F23645]">{sellPct.toFixed(0)}% SELL</strong>.
+          </p>
         </div>
 
         <div className="space-y-1.5 text-[11px]">

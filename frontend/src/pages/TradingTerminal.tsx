@@ -1,14 +1,23 @@
+import { useState } from "react";
 import {
+  Bell,
+  Bookmark,
+  Briefcase,
+  ChevronDown,
+  ChevronUp,
   Crosshair,
   Flag,
+  Layers,
   LogOut,
   Magnet,
   Maximize2,
   Minus,
   Moon,
+  Newspaper,
   Radio,
   ShieldCheck,
   Sun,
+  TrendingUp,
   Wallet,
   ZoomIn,
   ZoomOut,
@@ -21,6 +30,7 @@ import { getSymbolBadgeColor, toggleColorScheme, useResolvedTheme } from "../lib
 import { TimeframeSec } from "../lib/types";
 import { useMarketSocket } from "../lib/useMarketSocket";
 import { useMarketStore } from "../store/useMarketStore";
+import { PortfolioView } from "./PortfolioView";
 
 interface Props {
   onLogout: () => void;
@@ -38,15 +48,21 @@ export function TradingTerminal({ onLogout, onGoAdmin }: Props) {
   useMarketSocket(true);
   const theme = useResolvedTheme();
 
+  const [subView, setSubView] = useState<"FLOOR" | "PORTFOLIO">("FLOOR");
+  const [showFeedDrawer, setShowFeedDrawer] = useState(false);
+
   const user = useMarketStore((s) => s.user);
   const portfolio = useMarketStore((s) => s.portfolio);
   const selectedSymbol = useMarketStore((s) => s.selectedSymbol);
+  const setSelectedSymbol = useMarketStore((s) => s.setSelectedSymbol);
   const timeframeSec = useMarketStore((s) => s.timeframeSec);
   const setTimeframeSec = useMarketStore((s) => s.setTimeframeSec);
   const connectionMode = useMarketStore((s) => s.connectionMode);
   const activeGatewayLabel = useMarketStore((s) => s.activeGatewayLabel);
   const activeHeadline = useMarketStore((s) => s.activeHeadline);
   const activeScenarioName = useMarketStore((s) => s.activeScenarioName);
+  const volatilityRegime = useMarketStore((s) => s.volatilityRegime);
+  const eventFeed = useMarketStore((s) => s.eventFeed);
   const magnetCrosshair = useMarketStore((s) => s.magnetCrosshair);
   const showEntryLine = useMarketStore((s) => s.showEntryLine);
   const showEraMarkers = useMarketStore((s) => s.showEraMarkers);
@@ -61,6 +77,7 @@ export function TradingTerminal({ onLogout, onGoAdmin }: Props) {
   const totalReturn = netWorth - startingCapital;
   const returnPct = startingCapital > 0 ? (totalReturn / startingCapital) * 100 : 0;
   const badgeColor = getSymbolBadgeColor(selectedSymbol);
+  const holdingsCount = portfolio?.holdings?.length ?? 0;
 
   return (
     <div className="min-h-[100dvh] lg:h-[100dvh] bg-[var(--tv-bg)] text-[var(--tv-text)] flex flex-col overflow-x-hidden lg:overflow-hidden">
@@ -79,6 +96,34 @@ export function TradingTerminal({ onLogout, onGoAdmin }: Props) {
             <span className="hidden xl:inline text-[11px] font-semibold text-[var(--tv-muted)]">
               GENESIS 2026
             </span>
+          </div>
+
+          {/* Supercharts vs Holdings Switcher */}
+          <div className="flex items-center gap-0.5 pr-2 border-r border-[var(--tv-border)] text-[11px] font-semibold">
+            <button
+              type="button"
+              onClick={() => setSubView("FLOOR")}
+              className={`px-2 py-1 rounded flex items-center gap-1 transition-colors ${
+                subView === "FLOOR"
+                  ? "bg-[#2962FF]/15 text-[#2962FF]"
+                  : "text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)]"
+              }`}
+            >
+              <TrendingUp className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Supercharts</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setSubView("PORTFOLIO")}
+              className={`px-2 py-1 rounded flex items-center gap-1 transition-colors ${
+                subView === "PORTFOLIO"
+                  ? "bg-[#2962FF]/15 text-[#2962FF]"
+                  : "text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)]"
+              }`}
+            >
+              <Briefcase className="w-3.5 h-3.5" />
+              <span>Holdings ({holdingsCount})</span>
+            </button>
           </div>
 
           {/* Timeframe Selector */}
@@ -102,7 +147,7 @@ export function TradingTerminal({ onLogout, onGoAdmin }: Props) {
             })}
           </div>
 
-          {/* Quick Zoom Controls in Top Toolbar */}
+          {/* Quick Zoom Controls */}
           <div className="hidden md:flex items-center gap-0.5 pr-2 border-r border-[var(--tv-border)]">
             <button
               type="button"
@@ -130,7 +175,6 @@ export function TradingTerminal({ onLogout, onGoAdmin }: Props) {
             </button>
           </div>
 
-          {/* Scenario Tag */}
           <span className="hidden 2xl:inline px-2 py-0.5 rounded bg-[var(--tv-surface)] border border-[var(--tv-border)] text-[10px] font-mono text-[var(--tv-muted)]">
             {activeScenarioName}
           </span>
@@ -219,120 +263,215 @@ export function TradingTerminal({ onLogout, onGoAdmin }: Props) {
         </div>
       </header>
 
-      {/* Floor Wire Breaking News Bar */}
-      <div className="bg-[var(--tv-surface)] border-b border-[var(--tv-border)] px-3 py-1 text-[11px] flex items-center gap-2 shrink-0">
-        <span className="px-1.5 py-0.5 rounded bg-[#2962FF]/15 text-[#2962FF] font-mono font-bold text-[10px] shrink-0">
-          WIRE
-        </span>
-        <p className="text-[var(--tv-text)] font-medium truncate">{activeHeadline}</p>
+      {/* Expandable Floor Wire Breaking News Bar */}
+      <div className="bg-[var(--tv-surface)] border-b border-[var(--tv-border)] shrink-0">
+        <button
+          type="button"
+          onClick={() => setShowFeedDrawer((v) => !v)}
+          className="w-full px-3 py-1 text-[11px] flex items-center justify-between gap-2 text-left hover:bg-[var(--tv-hover)] transition-colors"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="px-1.5 py-0.5 rounded bg-[#2962FF]/15 text-[#2962FF] font-mono font-bold text-[10px] shrink-0">
+              WIRE · {volatilityRegime}
+            </span>
+            <p className="text-[var(--tv-text)] font-medium truncate">{activeHeadline}</p>
+          </div>
+          <span className="text-[10px] font-mono text-[var(--tv-muted)] flex items-center gap-1 shrink-0">
+            History ({eventFeed.length})
+            {showFeedDrawer ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          </span>
+        </button>
+
+        {showFeedDrawer && eventFeed.length > 0 && (
+          <div className="px-3 py-2 border-t border-[var(--tv-border)] bg-[var(--tv-bg)] max-h-36 overflow-y-auto scroller space-y-1 text-[11px]">
+            {eventFeed.map((ev) => (
+              <div key={ev.id} className="flex items-baseline gap-2.5">
+                <span className="font-mono text-[10px] text-[var(--tv-muted)] shrink-0">
+                  {new Date(ev.time_ms).toLocaleTimeString("en-IN", { hour12: false })}
+                </span>
+                <span
+                  className={`px-1.5 py-0.5 rounded font-mono text-[9px] font-bold shrink-0 ${
+                    ev.type === "CRASH"
+                      ? "bg-[#F23645]/15 text-[#F23645]"
+                      : ev.type === "BOOM"
+                      ? "bg-[#089981]/15 text-[#089981]"
+                      : "bg-[#F59E0B]/15 text-[#F59E0B]"
+                  }`}
+                >
+                  {ev.type}
+                </span>
+                <span className="text-[var(--tv-text)] truncate">{ev.headline}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* Main TradingView Supercharts Grid: [Left Tools] + [Chart & Blotter] + [Watchlist + Inspector/Trade] */}
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-[44px_1fr_340px] min-w-0 min-h-0">
-        {/* Left Vertical Chart Toolbar */}
-        <nav
-          aria-label="Chart tools"
-          className="hidden lg:flex flex-col items-center py-2.5 gap-2 bg-[var(--tv-bg)] border-r border-[var(--tv-border)] shrink-0"
-        >
-          <button
-            type="button"
-            onClick={() => dispatchChartCommand("FIT")}
-            title="Crosshair / Reset Chart View"
-            className="p-2 rounded hover:bg-[var(--tv-hover)] text-[var(--tv-muted)] hover:text-[var(--tv-text)] transition-colors"
+      {subView === "PORTFOLIO" ? (
+        <PortfolioView
+          onOpenTickerInFloor={(sym) => {
+            setSelectedSymbol(sym);
+            setSubView("FLOOR");
+          }}
+        />
+      ) : (
+        <main className="flex-1 grid grid-cols-1 lg:grid-cols-[44px_1fr_336px_40px] min-w-0 min-h-0">
+          {/* Left Vertical Chart Drawing Rail */}
+          <nav
+            aria-label="Chart tools"
+            className="hidden lg:flex flex-col items-center py-2.5 gap-2 bg-[var(--tv-bg)] border-r border-[var(--tv-border)] shrink-0"
           >
-            <Crosshair className="w-4 h-4" />
-          </button>
+            <button
+              type="button"
+              onClick={() => dispatchChartCommand("FIT")}
+              title="Crosshair / Reset Chart View"
+              className="p-2 rounded hover:bg-[var(--tv-hover)] text-[var(--tv-muted)] hover:text-[var(--tv-text)] transition-colors"
+            >
+              <Crosshair className="w-4 h-4" />
+            </button>
 
-          <button
-            type="button"
-            onClick={toggleMagnetCrosshair}
-            title={magnetCrosshair ? "Magnet OHLC Snap: ON" : "Magnet OHLC Snap: OFF"}
-            aria-pressed={magnetCrosshair}
-            className={`p-2 rounded transition-colors ${
-              magnetCrosshair
-                ? "bg-[#2962FF]/15 text-[#2962FF]"
-                : "text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)]"
-            }`}
-          >
-            <Magnet className="w-4 h-4" />
-          </button>
+            <button
+              type="button"
+              onClick={toggleMagnetCrosshair}
+              title={magnetCrosshair ? "Magnet OHLC Snap: ON" : "Magnet OHLC Snap: OFF"}
+              aria-pressed={magnetCrosshair}
+              className={`p-2 rounded transition-colors ${
+                magnetCrosshair
+                  ? "bg-[#2962FF]/15 text-[#2962FF]"
+                  : "text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)]"
+              }`}
+            >
+              <Magnet className="w-4 h-4" />
+            </button>
 
-          <button
-            type="button"
-            onClick={toggleEntryLine}
-            title={showEntryLine ? "Hide Avg Entry Price Line" : "Show Avg Entry Price Line"}
-            aria-pressed={showEntryLine}
-            className={`p-2 rounded transition-colors ${
-              showEntryLine
-                ? "bg-[#089981]/15 text-[#089981]"
-                : "text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)]"
-            }`}
-          >
-            <Minus className="w-4 h-4" />
-          </button>
+            <button
+              type="button"
+              onClick={toggleEntryLine}
+              title={showEntryLine ? "Hide Avg Entry Price Line" : "Show Avg Entry Price Line"}
+              aria-pressed={showEntryLine}
+              className={`p-2 rounded transition-colors ${
+                showEntryLine
+                  ? "bg-[#089981]/15 text-[#089981]"
+                  : "text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)]"
+              }`}
+            >
+              <Minus className="w-4 h-4" />
+            </button>
 
-          <button
-            type="button"
-            onClick={toggleEraMarkers}
-            title={showEraMarkers ? "Hide Era Shock Markers" : "Show Era Shock Markers"}
-            aria-pressed={showEraMarkers}
-            className={`p-2 rounded transition-colors ${
-              showEraMarkers
-                ? "bg-[#F59E0B]/15 text-[#F59E0B]"
-                : "text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)]"
-            }`}
-          >
-            <Flag className="w-4 h-4" />
-          </button>
+            <button
+              type="button"
+              onClick={toggleEraMarkers}
+              title={showEraMarkers ? "Hide Era Shock Markers" : "Show Era Shock Markers"}
+              aria-pressed={showEraMarkers}
+              className={`p-2 rounded transition-colors ${
+                showEraMarkers
+                  ? "bg-[#F59E0B]/15 text-[#F59E0B]"
+                  : "text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)]"
+              }`}
+            >
+              <Flag className="w-4 h-4" />
+            </button>
 
-          <div className="w-5 h-px bg-[var(--tv-border)] my-1" />
+            <div className="w-5 h-px bg-[var(--tv-border)] my-1" />
 
-          <button
-            type="button"
-            onClick={() => dispatchChartCommand("ZOOM_IN")}
-            title="Zoom In Candles"
-            className="p-2 rounded text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)] transition-colors"
-          >
-            <ZoomIn className="w-4 h-4" />
-          </button>
+            <button
+              type="button"
+              onClick={() => dispatchChartCommand("ZOOM_IN")}
+              title="Zoom In Candles"
+              className="p-2 rounded text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)] transition-colors"
+            >
+              <ZoomIn className="w-4 h-4" />
+            </button>
 
-          <button
-            type="button"
-            onClick={() => dispatchChartCommand("ZOOM_OUT")}
-            title="Zoom Out Candles"
-            className="p-2 rounded text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)] transition-colors"
-          >
-            <ZoomOut className="w-4 h-4" />
-          </button>
+            <button
+              type="button"
+              onClick={() => dispatchChartCommand("ZOOM_OUT")}
+              title="Zoom Out Candles"
+              className="p-2 rounded text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)] transition-colors"
+            >
+              <ZoomOut className="w-4 h-4" />
+            </button>
 
-          <button
-            type="button"
-            onClick={() => dispatchChartCommand("FIT")}
-            title="Fit & Auto-Scale Chart"
-            className="p-2 rounded text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)] transition-colors"
-          >
-            <Maximize2 className="w-4 h-4" />
-          </button>
-        </nav>
+            <button
+              type="button"
+              onClick={() => dispatchChartCommand("FIT")}
+              title="Fit & Auto-Scale Chart"
+              className="p-2 rounded text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)] transition-colors"
+            >
+              <Maximize2 className="w-4 h-4" />
+            </button>
+          </nav>
 
-        {/* Center Stage: Candlestick Chart + Holdings Blotter */}
-        <div className="flex flex-col min-w-0 min-h-0">
-          <div className="flex-1 min-h-[380px] min-w-0">
-            <CandlestickChart />
+          {/* Center Stage: Candlestick Chart + Holdings Blotter */}
+          <div className="flex flex-col min-w-0 min-h-0">
+            <div className="flex-1 min-h-[380px] min-w-0">
+              <CandlestickChart />
+            </div>
+            <HoldingsBlotter />
           </div>
-          <HoldingsBlotter />
-        </div>
 
-        {/* Right Sidebar: Top Watchlist Table + Bottom Stock Inspector & Execution Ticket */}
-        <aside className="border-t lg:border-t-0 lg:border-l border-[var(--tv-border)] flex flex-col min-w-0 min-h-0 bg-[var(--tv-bg)] overflow-y-auto lg:overflow-hidden">
-          <div className="flex-1 min-h-[260px] min-w-0">
-            <WatchlistSidebar />
-          </div>
-          <div className="shrink-0 min-w-0">
-            <ExecutionDock />
-          </div>
-        </aside>
-      </main>
+          {/* Right Split Sidebar: Watchlist Table + Stock Inspector & Order Ticket */}
+          <aside className="border-t lg:border-t-0 lg:border-l border-[var(--tv-border)] flex flex-col min-w-0 min-h-0 bg-[var(--tv-bg)] overflow-y-auto lg:overflow-hidden">
+            <div className="flex-1 min-h-[260px] min-w-0">
+              <WatchlistSidebar />
+            </div>
+            <div className="shrink-0 min-w-0">
+              <ExecutionDock />
+            </div>
+          </aside>
+
+          {/* Right-Edge TradingView Utility Strip */}
+          <aside
+            aria-label="Workspace panels"
+            className="hidden lg:flex flex-col items-center py-2.5 gap-2.5 bg-[var(--tv-bg)] border-l border-[var(--tv-border)] shrink-0"
+          >
+            <button
+              type="button"
+              onClick={() => setSubView("FLOOR")}
+              title="Watchlist & Supercharts"
+              className={`p-2 rounded transition-colors ${
+                subView === "FLOOR"
+                  ? "bg-[#2962FF]/15 text-[#2962FF]"
+                  : "text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)]"
+              }`}
+            >
+              <Bookmark className="w-4 h-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowFeedDrawer((v) => !v)}
+              title="Floor Wire & Breaking Alerts"
+              aria-pressed={showFeedDrawer}
+              className={`p-2 rounded transition-colors ${
+                showFeedDrawer
+                  ? "bg-[#2962FF]/15 text-[#2962FF]"
+                  : "text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)]"
+              }`}
+            >
+              <Newspaper className="w-4 h-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSubView("PORTFOLIO")}
+              title="Holdings & Execution Ledger"
+              className="p-2 rounded text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)] transition-colors"
+            >
+              <Layers className="w-4 h-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={toggleEraMarkers}
+              title="Macro Shock Timeline"
+              className="p-2 rounded text-[var(--tv-muted)] hover:text-[var(--tv-text)] hover:bg-[var(--tv-hover)] transition-colors"
+            >
+              <Bell className="w-4 h-4" />
+            </button>
+          </aside>
+        </main>
+      )}
     </div>
   );
 }

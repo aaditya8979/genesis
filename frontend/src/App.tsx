@@ -26,21 +26,39 @@ export default function App() {
       return;
     }
     setHydrating(true);
-    apiFetch<any>("/api/v1/bootstrap")
-      .then((data) => {
-        hydrateBootstrap(data);
-        setHydrating(false);
-      })
-      .catch(() => {
-        localStorage.removeItem("genesis_token");
-        setRoute("LOGIN");
-        setHydrating(false);
-      });
+    let cancelled = false;
+    let retryTimer: number | undefined;
+
+    const boot = () => {
+      apiFetch<any>("/api/v1/bootstrap")
+        .then((data) => {
+          if (cancelled) return;
+          hydrateBootstrap(data);
+          setHydrating(false);
+        })
+        .catch((err: any) => {
+          if (cancelled) return;
+          if (err?.status === 401 || err?.status === 403) {
+            localStorage.removeItem("genesis_token");
+            setRoute("LOGIN");
+            setHydrating(false);
+            return;
+          }
+          // Transient outage or standby failover in progress — keep JWT token and retry smoothly
+          retryTimer = window.setTimeout(boot, 2000);
+        });
+    };
+
+    boot();
+    return () => {
+      cancelled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
   }, [route, hydrateBootstrap]);
 
   return (
     <>
-      <Toaster theme={theme} position="top-right" richColors closeButton />
+      <Toaster theme={theme} position="bottom-left" richColors closeButton />
       {route === "ADMIN" ? (
         <AdminPortal
           onBackTerminal={() => setRoute(localStorage.getItem("genesis_token") ? "TERMINAL" : "LOGIN")}

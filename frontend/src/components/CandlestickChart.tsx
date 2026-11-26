@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import {
   ColorType,
   CrosshairMode,
@@ -6,6 +7,7 @@ import {
   IPriceLine,
   ISeriesApi,
   PriceScaleMode,
+  SeriesMarker,
   Time,
   createChart,
 } from "lightweight-charts";
@@ -16,7 +18,6 @@ import { useMarketStore } from "../store/useMarketStore";
 function resampleCandles(bars5s: CandleBar[] | undefined, tfSec: TimeframeSec): CandleBar[] {
   if (!bars5s || bars5s.length === 0) return [];
 
-  // Always clone objects and strictly enforce ascending unique timestamps so zooming/updating never glitches
   const sorted = [...bars5s].sort((a, b) => a.time - b.time);
   const grouped: CandleBar[] = [];
 
@@ -49,14 +50,23 @@ function formatVol(v: number): string {
   return String(v);
 }
 
+function formatIstClock(unixSec: number): string {
+  return new Date(unixSec * 1000).toLocaleTimeString("en-IN", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 const CHART_PALETTE = {
   dark: {
-    bg: "#131722",
-    text: "#787B86",
-    grid: "rgba(42, 46, 57, 0.55)",
-    border: "#2A2E39",
-    crosshair: "#50535E",
-    crosshairLabel: "#2A2E39",
+    bg: "#0F0F0F",
+    text: "#8A8A8A",
+    grid: "rgba(255, 255, 255, 0.045)",
+    border: "#2A2A2A",
+    crosshair: "#4D4D4D",
+    crosshairLabel: "#262626",
   },
   light: {
     bg: "#FFFFFF",
@@ -75,8 +85,8 @@ export function CandlestickChart() {
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const entryPriceLineRef = useRef<IPriceLine | null>(null);
+  const hasFittedWidthRef = useRef<boolean>(false);
 
-  // Direct DOM refs for 60 FPS crosshair OHLC updates without React re-renders
   const oRef = useRef<HTMLSpanElement | null>(null);
   const hRef = useRef<HTMLSpanElement | null>(null);
   const lRef = useRef<HTMLSpanElement | null>(null);
@@ -84,6 +94,7 @@ export function CandlestickChart() {
   const chgRef = useRef<HTMLSpanElement | null>(null);
   const volRef = useRef<HTMLSpanElement | null>(null);
 
+  const [showHudQuotes, setShowHudQuotes] = useState(true);
   const [clockText, setClockText] = useState(() =>
     new Date().toLocaleTimeString("en-IN", { hour12: false })
   );
@@ -94,7 +105,7 @@ export function CandlestickChart() {
   const isMarketOpen = useMarketStore((s) => s.isMarketOpen);
   const timeframeSec = useMarketStore((s) => s.timeframeSec);
   const rawBars = useMarketStore((s) => s.candles[s.selectedSymbol]);
-  const eraMarkers = useMarketStore((s) => s.eraMarkers);
+  const chartMarkers = useMarketStore((s) => s.chartMarkers);
   const magnetCrosshair = useMarketStore((s) => s.magnetCrosshair);
   const showEntryLine = useMarketStore((s) => s.showEntryLine);
   const showEraMarkers = useMarketStore((s) => s.showEraMarkers);
@@ -145,7 +156,6 @@ export function CandlestickChart() {
     }
   };
 
-  // Live clock footer
   useEffect(() => {
     const t = window.setInterval(() => {
       setClockText(new Date().toLocaleTimeString("en-IN", { hour12: false }));
@@ -153,7 +163,6 @@ export function CandlestickChart() {
     return () => window.clearInterval(t);
   }, []);
 
-  // Create chart once
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -161,11 +170,16 @@ export function CandlestickChart() {
     const pal = CHART_PALETTE[getInitialTheme()];
 
     const chart = createChart(el, {
+      width: el.clientWidth || 920,
+      height: el.clientHeight || 500,
       layout: {
         background: { type: ColorType.Solid, color: pal.bg },
         textColor: pal.text,
-        fontFamily: '"JetBrains Mono", monospace',
+        fontFamily: '"IBM Plex Mono", "Trebuchet MS", sans-serif',
         fontSize: 11,
+      },
+      localization: {
+        timeFormatter: (ts: number) => formatIstClock(ts),
       },
       grid: {
         vertLines: { color: pal.grid },
@@ -179,7 +193,7 @@ export function CandlestickChart() {
       rightPriceScale: {
         borderColor: pal.border,
         autoScale: true,
-        scaleMargins: { top: 0.14, bottom: 0.2 },
+        scaleMargins: { top: 0.12, bottom: 0.25 },
       },
       timeScale: {
         borderColor: pal.border,
@@ -189,7 +203,8 @@ export function CandlestickChart() {
         minBarSpacing: 2,
         rightOffset: 8,
         shiftVisibleRangeOnNewBar: true,
-        lockVisibleTimeRangeOnResize: true,
+        lockVisibleTimeRangeOnResize: false,
+        tickMarkFormatter: (time: number) => formatIstClock(time),
       },
       handleScroll: {
         mouseWheel: true,
@@ -219,7 +234,7 @@ export function CandlestickChart() {
       priceScaleId: "vol",
     });
     chart.priceScale("vol").applyOptions({
-      scaleMargins: { top: 0.82, bottom: 0 },
+      scaleMargins: { top: 0.84, bottom: 0 },
     });
 
     chart.subscribeCrosshairMove((param) => {
@@ -252,12 +267,25 @@ export function CandlestickChart() {
         const { width, height } = entry.contentRect;
         if (width > 0 && height > 0) {
           chart.applyOptions({ width, height });
+          const len = resampledRef.current.length;
+          if (!hasFittedWidthRef.current && width > 120 && len > 0) {
+            hasFittedWidthRef.current = true;
+            const visibleWindow = Math.min(Math.max(len, 24), 68);
+            chart.timeScale().setVisibleLogicalRange({
+              from: Math.max(-2, len - visibleWindow),
+              to: len + 6,
+            });
+          }
         }
       }
     });
     resizeObserver.observe(el);
 
     return () => {
+      hasFittedWidthRef.current = false;
+      renderedKeyRef.current = "";
+      renderedLenRef.current = 0;
+      firstTimeRef.current = 0;
       resizeObserver.disconnect();
       chart.remove();
       chartRef.current = null;
@@ -267,7 +295,6 @@ export function CandlestickChart() {
     };
   }, []);
 
-  // Sync theme, crosshair, and scale options cleanly without recreating chart
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
@@ -305,7 +332,6 @@ export function CandlestickChart() {
     });
   }, [theme, magnetCrosshair, autoScale, priceScaleMode, timeframeSec]);
 
-  // Data feed synchronization — preserves user zoom/pan on live ticks!
   const renderedKeyRef = useRef<string>("");
   const renderedLenRef = useRef<number>(0);
   const firstTimeRef = useRef<number>(0);
@@ -322,7 +348,8 @@ export function CandlestickChart() {
       renderedKeyRef.current !== currentKey ||
       renderedLenRef.current === 0 ||
       resampled.length < renderedLenRef.current ||
-      firstTs < firstTimeRef.current;
+      firstTs < firstTimeRef.current ||
+      (renderedLenRef.current <= 3 && resampled.length > 10);
 
     if (needsFullReset) {
       cs.setData(
@@ -338,23 +365,29 @@ export function CandlestickChart() {
         resampled.map((b) => ({
           time: b.time as Time,
           value: b.volume,
-          color: b.close >= b.open ? "rgba(8, 153, 129, 0.32)" : "rgba(242, 54, 69, 0.32)",
+          color: b.close >= b.open ? "rgba(8, 153, 129, 0.34)" : "rgba(242, 54, 69, 0.34)",
         }))
       );
 
-      // Show a crisp TradingView-proportioned window (~60 bars) rather than squishing or over-stretching
       const len = resampled.length;
-      const visibleWindow = Math.min(Math.max(len, 28), 64);
-      chart.timeScale().setVisibleLogicalRange({
-        from: len - visibleWindow,
-        to: len + 6,
-      });
+      const visibleWindow = Math.min(Math.max(len, 24), 68);
+      const applyRange = () => {
+        const w = containerRef.current?.clientWidth ?? 0;
+        if (w > 120) {
+          hasFittedWidthRef.current = true;
+          chartRef.current?.timeScale().setVisibleLogicalRange({
+            from: Math.max(-2, len - visibleWindow),
+            to: len + 6,
+          });
+        }
+      };
+      applyRange();
+      requestAnimationFrame(applyRange);
 
       renderedKeyRef.current = currentKey;
       renderedLenRef.current = len;
       firstTimeRef.current = firstTs;
     } else {
-      // If a new bar bucket rolled in or last bar updated, apply delta updates cleanly without touching zoom
       const startIdx = Math.max(0, renderedLenRef.current - 1);
       for (let i = startIdx; i < resampled.length; i++) {
         const b = resampled[i];
@@ -368,7 +401,7 @@ export function CandlestickChart() {
         vs.update({
           time: b.time as Time,
           value: b.volume,
-          color: b.close >= b.open ? "rgba(8, 153, 129, 0.32)" : "rgba(242, 54, 69, 0.32)",
+          color: b.close >= b.open ? "rgba(8, 153, 129, 0.34)" : "rgba(242, 54, 69, 0.34)",
         });
       }
       renderedLenRef.current = resampled.length;
@@ -376,37 +409,39 @@ export function CandlestickChart() {
 
     paintOhlcDom(resampled[resampled.length - 1]);
 
-    // Strictly sorted unique era markers within loaded range
-    if (showEraMarkers && eraMarkers.length > 0 && resampled.length > 0) {
+    if (showEraMarkers && chartMarkers.length > 0 && resampled.length > 0) {
       const minBarTime = resampled[0].time;
-      const seenTimes = new Set<number>();
-      const validMarkers = eraMarkers
+      const relevant = chartMarkers.filter(
+        (m) => m.symbol === "ALL" || m.symbol === selectedSymbol
+      );
+      const sortedMarkers = relevant
         .map((m) => ({
           time: Math.floor(m.time / timeframeSec) * timeframeSec,
-          label: m.label,
           color: m.color,
+          label: m.label,
         }))
         .filter((m) => m.time >= minBarTime)
-        .sort((a, b) => a.time - b.time)
-        .filter((m) => {
-          if (seenTimes.has(m.time)) return false;
-          seenTimes.add(m.time);
-          return true;
-        })
-        .map((m) => ({
+        .sort((a, b) => a.time - b.time);
+
+      const seenTimes = new Set<number>();
+      const validMarkers: SeriesMarker<Time>[] = [];
+      for (const m of sortedMarkers) {
+        if (seenTimes.has(m.time)) continue;
+        seenTimes.add(m.time);
+        validMarkers.push({
           time: m.time as Time,
-          position: "aboveBar" as const,
-          color: m.color,
-          shape: "arrowDown" as const,
-          text: m.label.replace("ERA_", "E"),
-        }));
+          position: "aboveBar",
+          color: m.color || "#F59E0B",
+          shape: "arrowDown",
+          text: m.label.slice(0, 14),
+        });
+      }
       cs.setMarkers(validMarkers);
     } else {
       cs.setMarkers([]);
     }
-  }, [resampled, selectedSymbol, timeframeSec, eraMarkers, showEraMarkers]);
+  }, [resampled, selectedSymbol, timeframeSec, chartMarkers, showEraMarkers]);
 
-  // Draw Open Position Avg Entry Line directly on TradingView canvas
   useEffect(() => {
     const cs = candleSeriesRef.current;
     if (!cs) return;
@@ -423,14 +458,13 @@ export function CandlestickChart() {
         price: holding.avg_entry_price,
         color: isLong ? "#089981" : "#F59E0B",
         lineWidth: 1,
-        lineStyle: 2, // Dashed
+        lineStyle: 2,
         axisLabelVisible: true,
         title: `${holding.position_type} ${holding.quantity} @ ₹${holding.avg_entry_price.toFixed(2)}`,
       });
     }
   }, [selectedSymbol, portfolio?.holdings, showEntryLine, resampled.length]);
 
-  // Handle interactive zoom / range commands from toolbar or footer
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart || !chartCommand) return;
@@ -439,8 +473,8 @@ export function CandlestickChart() {
     if (len === 0) return;
 
     if (chartCommand === "FIT") {
-      const w = Math.min(Math.max(len, 28), 64);
-      ts.setVisibleLogicalRange({ from: len - w, to: len + 6 });
+      const w = Math.min(Math.max(len, 24), 68);
+      ts.setVisibleLogicalRange({ from: Math.max(-2, len - w), to: len + 6 });
       chart.priceScale("right").applyOptions({ autoScale: true });
       setAutoScale(true);
     } else if (chartCommand === "RANGE_ALL") {
@@ -456,7 +490,7 @@ export function CandlestickChart() {
       if (range) {
         const span = range.to - range.from;
         const factor = chartCommand === "ZOOM_IN" ? 0.72 : 1.38;
-        const nextSpan = Math.min(Math.max(span * factor, 10), Math.max(len + 20, 420));
+        const nextSpan = Math.min(Math.max(span * factor, 10), Math.max(len + 20, 480));
         ts.setVisibleLogicalRange({
           from: range.to - nextSpan,
           to: range.to,
@@ -476,7 +510,7 @@ export function CandlestickChart() {
         className="relative flex-1 min-h-0 w-full"
         onDoubleClick={() => dispatchChartCommand("FIT")}
       >
-        {/* Top-Left TradingView OHLCV HUD + Instant Sell/Buy Quote Buttons */}
+        {/* Top-Left TradingView OHLCV Legend + Instant Sell/Buy Quote Boxes */}
         <div className="pointer-events-none absolute top-2.5 left-3 right-20 z-10 flex flex-col gap-1.5">
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
             <div className="flex items-center gap-1.5">
@@ -503,7 +537,7 @@ export function CandlestickChart() {
               }`}
             >
               <span className={`w-1.5 h-1.5 rounded-full ${isMarketOpen ? "bg-[#089981]" : "bg-[#F23645]"}`} />
-              {isMarketOpen ? "AMM Live" : "Paused"}
+              {isMarketOpen ? "Live" : "Paused"}
             </span>
 
             <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono tabular-nums">
@@ -523,49 +557,59 @@ export function CandlestickChart() {
             </div>
           </div>
 
-          {/* Floating SELL / BUY Quote Boxes matching TradingView screenshot */}
-          <div className="pointer-events-auto flex items-center gap-2 w-fit">
+          {showHudQuotes && (
+            <div className="pointer-events-auto flex items-center gap-2 w-fit">
+              <button
+                type="button"
+                onClick={() => setPreferredOrderTab("SELL")}
+                className="px-2.5 py-1 rounded border border-[#F23645]/75 bg-[var(--tv-bg)]/95 hover:bg-[#F23645]/10 transition-colors flex flex-col items-center leading-tight"
+                title="Switch Order Ticket to SELL"
+              >
+                <span className="font-mono text-[11px] font-bold text-[#F23645] tabular-nums">
+                  {spotPrice.toFixed(2)}
+                </span>
+                <span className="text-[9px] font-bold uppercase tracking-wider text-[#F23645]">
+                  SELL
+                </span>
+              </button>
+
+              <span className="font-mono text-[10px] text-[var(--tv-muted)] tabular-nums">0.00</span>
+
+              <button
+                type="button"
+                onClick={() => setPreferredOrderTab("BUY")}
+                className="px-2.5 py-1 rounded border border-[#2962FF]/80 bg-[var(--tv-bg)]/95 hover:bg-[#2962FF]/10 transition-colors flex flex-col items-center leading-tight"
+                title="Switch Order Ticket to BUY"
+              >
+                <span className="font-mono text-[11px] font-bold text-[#2962FF] tabular-nums">
+                  {spotPrice.toFixed(2)}
+                </span>
+                <span className="text-[9px] font-bold uppercase tracking-wider text-[#2962FF]">
+                  BUY
+                </span>
+              </button>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 text-[11px] font-mono text-[var(--tv-muted)] tabular-nums">
+            <span>
+              Vol <span ref={volRef} className="text-[#089981] font-semibold">—</span>
+            </span>
             <button
               type="button"
-              onClick={() => setPreferredOrderTab("SELL")}
-              className="px-2.5 py-1 rounded border border-[#F23645]/70 bg-[var(--tv-bg)]/90 hover:bg-[#F23645]/10 transition-colors flex flex-col items-center leading-tight"
-              title="Switch Order Ticket to SELL"
+              onClick={() => setShowHudQuotes((v) => !v)}
+              title={showHudQuotes ? "Collapse Buy/Sell Overlay" : "Expand Buy/Sell Overlay"}
+              className="pointer-events-auto p-0.5 rounded border border-[var(--tv-border)] bg-[var(--tv-surface)]/80 hover:bg-[var(--tv-hover)] text-[var(--tv-muted)] hover:text-[var(--tv-text)]"
             >
-              <span className="font-mono text-[11px] font-bold text-[#F23645] tabular-nums">
-                {spotPrice.toFixed(2)}
-              </span>
-              <span className="text-[9px] font-bold uppercase tracking-wider text-[#F23645]">
-                SELL
-              </span>
+              {showHudQuotes ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
             </button>
-
-            <span className="font-mono text-[10px] text-[var(--tv-muted)] tabular-nums">0.00</span>
-
-            <button
-              type="button"
-              onClick={() => setPreferredOrderTab("BUY")}
-              className="px-2.5 py-1 rounded border border-[#2962FF]/80 bg-[var(--tv-bg)]/90 hover:bg-[#2962FF]/10 transition-colors flex flex-col items-center leading-tight"
-              title="Switch Order Ticket to BUY"
-            >
-              <span className="font-mono text-[11px] font-bold text-[#2962FF] tabular-nums">
-                {spotPrice.toFixed(2)}
-              </span>
-              <span className="text-[9px] font-bold uppercase tracking-wider text-[#2962FF]">
-                BUY
-              </span>
-            </button>
-          </div>
-
-          <div className="text-[11px] font-mono text-[var(--tv-muted)] tabular-nums">
-            Vol <span ref={volRef} className="text-[#089981] font-semibold">—</span>
           </div>
         </div>
 
-        {/* Chart Render Surface */}
         <div ref={containerRef} className="w-full h-full" />
       </div>
 
-      {/* Bottom TradingView Range & Scale Footer */}
+      {/* Bottom TradingView Range & Scale Bar */}
       <div className="h-8 border-t border-[var(--tv-border)] bg-[var(--tv-bg)] px-3 flex items-center justify-between gap-2 text-[11px] shrink-0">
         <div className="flex items-center gap-1">
           {[
