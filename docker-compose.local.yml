@@ -26,7 +26,8 @@ services:
       ENVIRONMENT: local_docker
       DATABASE_URL: postgresql+asyncpg://genesis_admin:genesis_local_pass@postgres:5432/genesis_db
       SECRET_KEY: genesis_jwt_secret_key_2026_vitb_change_in_prod
-      ADMIN_SECRET_KEY: genesis_admin_master_2026
+      ADMIN_SECRET_KEY: ${ADMIN_SECRET_KEY:-genesis_admin_master_2026}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
       SNAPSHOT_INTERVAL_SECONDS: ${SNAPSHOT_INTERVAL_SECONDS:-5.0}
       AUTO_RESTORE_ON_BOOT: ${AUTO_RESTORE_ON_BOOT:-true}
       STANDBY_SYNC_URL: ${STANDBY_SYNC_URL:-}
@@ -50,7 +51,13 @@ services:
       - genesis_local_net
 
   nginx:
-    image: nginx:alpine
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+        VITE_WS_URL: ${VITE_WS_URL:-}
+        VITE_FALLBACK_URLS: ${VITE_FALLBACK_URLS:-}
     container_name: genesis_local_nginx
     restart: always
     ports:

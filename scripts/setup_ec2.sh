@@ -32,8 +32,23 @@ fi
 
 echo "=== 3. Installing Docker Engine & Compose Plugin if Missing ==="
 if ! command -v docker &> /dev/null; then
-  curl -fsSL https://get.docker.com | sudo sh
-  sudo usermod -aG docker "$USER"
+  if [[ -f /etc/os-release ]] && grep -qi 'amzn' /etc/os-release; then
+    sudo dnf install -y docker
+    sudo systemctl enable --now docker
+    sudo mkdir -p /usr/local/lib/docker/cli-plugins
+    ARCH=$(uname -m)
+    sudo curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${ARCH}" \
+      -o /usr/local/lib/docker/cli-plugins/docker-compose
+    sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+  else
+    curl -fsSL https://get.docker.com | sudo sh
+  fi
+  sudo usermod -aG docker "$USER" || true
+fi
+
+DOCKER_COMPOSE="docker compose"
+if ! docker info > /dev/null 2>&1; then
+  DOCKER_COMPOSE="sudo docker compose"
 fi
 
 echo "=== 4. Preparing .env Configuration ==="
@@ -47,15 +62,26 @@ if [[ ! -f .env ]]; then
   echo "Created .env with auto-generated Postgres & JWT secrets (set ADMIN_SECRET_KEY / SUPABASE / S3 as needed)."
 fi
 
+set_env_var() {
+  local key="$1"
+  local val="$2"
+  if grep -q "^${key}=" .env; then
+    sed -i.bak "s|^${key}=.*|${key}=${val}|" .env
+    rm -f .env.bak
+  else
+    echo "${key}=${val}" >> .env
+  fi
+}
+
 MODE="${1:-}"
 mkdir -p nginx/ssl backups
 
 if [[ "$MODE" == "--http" ]]; then
-  echo "Configuring Port 80 HTTP mode (set NGINX_CONF=./nginx/nginx.http.conf)..."
-  grep -q '^NGINX_CONF=' .env && sed -i.bak 's|^NGINX_CONF=.*|NGINX_CONF=./nginx/nginx.http.conf|' .env || echo 'NGINX_CONF=./nginx/nginx.http.conf' >> .env
-  rm -f .env.bak
+  echo "Configuring Port 80 HTTP mode (NGINX_CONF=./nginx/nginx.http.conf)..."
+  set_env_var "NGINX_CONF" "./nginx/nginx.http.conf"
 elif [[ -n "$MODE" ]]; then
   DOMAIN="$MODE"
+  set_env_var "NGINX_CONF" "./nginx/nginx.conf"
   echo "Provisioning Let's Encrypt TLS certificate for $DOMAIN on Port 443..."
   if command -v apt-get &> /dev/null; then
     sudo apt-get update && sudo apt-get install -y certbot
@@ -67,24 +93,48 @@ elif [[ -n "$MODE" ]]; then
   sudo cp "/etc/letsencrypt/live/${DOMAIN}/privkey.pem" nginx/ssl/privkey.pem
   sudo chmod 644 nginx/ssl/*.pem
 else
-  echo "Generating self-signed TLS cert fallback in nginx/ssl/ (pair with Cloudflare Full SSL or use --http)..."
-  openssl req -x509 -nodes -days 30 -newkey rsa:2048 \
-    -keyout nginx/ssl/privkey.pem \
-    -out nginx/ssl/fullchain.pem \
-    -subj "/CN=genesis2026.local"
+  set_env_var "NGINX_CONF" "./nginx/nginx.conf"
+  if [[ ! -f nginx/ssl/fullchain.pem || ! -f nginx/ssl/privkey.pem ]]; then
+    echo "Generating self-signed TLS cert fallback in nginx/ssl/ (pair with Cloudflare Full SSL or use --http)..."
+    openssl req -x509 -nodes -days 30 -newkey rsa:2048 \
+      -keyout nginx/ssl/privkey.pem \
+      -out nginx/ssl/fullchain.pem \
+      -subj "/CN=genesis2026.local"
+  fi
+fi
+
+# Optional S3 pre-boot restore + 1-minute off-instance snapshot sync cron
+S3_BUCKET=$(grep -E '^S3_BACKUP_BUCKET=' .env | cut -d= -f2- | tr -d '[:space:]' || true)
+if [[ -n "$S3_BUCKET" ]]; then
+  if ! command -v aws &> /dev/null; then
+    if command -v apt-get &> /dev/null; then
+      sudo apt-get update && sudo apt-get install -y awscli || true
+    elif command -v dnf &> /dev/null; then
+      sudo dnf install -y awscli || true
+    fi
+  fi
+  if command -v aws &> /dev/null; then
+    if [[ ! -f "$ROOT_DIR/backups/latest_snapshot.json" ]]; then
+      echo "Checking s3://${S3_BUCKET}/latest_snapshot.json for pre-boot disaster recovery..."
+      aws s3 cp "s3://${S3_BUCKET}/latest_snapshot.json" "$ROOT_DIR/backups/latest_snapshot.json" --only-show-errors || true
+    fi
+    CRON_CMD="* * * * * [ -f $ROOT_DIR/backups/latest_snapshot.json ] && aws s3 cp $ROOT_DIR/backups/latest_snapshot.json s3://${S3_BUCKET}/latest_snapshot.json --only-show-errors"
+    (crontab -l 2>/dev/null | grep -v 'latest_snapshot.json' ; echo "$CRON_CMD") | crontab -
+    echo "Enabled 1-minute Free-Tier S3 snapshot sync -> s3://${S3_BUCKET}/latest_snapshot.json"
+  fi
 fi
 
 echo "=== 5. Launching 3-Container Production Stack (Postgres + FastAPI + Vite/Nginx) ==="
-docker compose up -d --build
+$DOCKER_COMPOSE up -d --build
 
-# Optional Free-Tier S3 off-instance backup cron if S3_BACKUP_BUCKET is configured
-S3_BUCKET=$(grep -E '^S3_BACKUP_BUCKET=' .env | cut -d= -f2- | tr -d '[:space:]' || true)
-if [[ -n "$S3_BUCKET" ]] && command -v aws &> /dev/null; then
-  CRON_CMD="* * * * * [ -f $ROOT_DIR/backups/latest_snapshot.json ] && aws s3 cp $ROOT_DIR/backups/latest_snapshot.json s3://${S3_BUCKET}/latest_snapshot.json --only-show-errors"
-  (crontab -l 2>/dev/null | grep -v 'latest_snapshot.json' ; echo "$CRON_CMD") | crontab -
-  echo "Enabled 1-minute Free-Tier S3 snapshot sync -> s3://${S3_BUCKET}/latest_snapshot.json"
-fi
+echo "Waiting for GENESIS 2026 health endpoint..."
+for i in {1..20}; do
+  if curl -skf http://127.0.0.1/health 2>/dev/null || curl -skf https://127.0.0.1/health 2>/dev/null; then
+    echo ""
+    echo "=== GENESIS 2026 AWS Stack Online ==="
+    exit 0
+  fi
+  sleep 2
+done
 
-echo "=== GENESIS 2026 AWS Stack Online ==="
-curl -skf http://127.0.0.1/health || curl -skf https://127.0.0.1/health || true
-echo ""
+echo "WARNING: Stack started, check logs with: $DOCKER_COMPOSE logs -f backend nginx"
