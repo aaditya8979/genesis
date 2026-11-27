@@ -451,6 +451,16 @@ export function AdminPortal({ onBackTerminal }: Props) {
     fetchOverview();
   };
 
+  const resetMarketToBase = async () => {
+    try {
+      const res = await apiFetch<any>("/api/v1/admin/market/reset-prices", { method: "POST" });
+      toast.success(`Reset all ${res.stocks_reset} stocks to Round 0 Base levels`);
+      fetchOverview();
+    } catch (err: any) {
+      toast.error(err?.message || "Market reset failed");
+    }
+  };
+
   const allParticipants = overview?.participants || [];
   const realParticipants = useMemo(
     () => allParticipants.filter((p: any) => (p.cohort || "REAL") === "REAL"),
@@ -584,6 +594,15 @@ export function AdminPortal({ onBackTerminal }: Props) {
                 <PlayCircle className="w-3.5 h-3.5" /> RESUME
               </>
             )}
+          </button>
+
+          <button
+            type="button"
+            onClick={resetMarketToBase}
+            title="Reset all 30 stock prices & candles back to Round 0 Base levels (keeps students & wallets)"
+            className="px-2.5 py-1 rounded text-xs font-semibold border border-[var(--tv-border)] bg-[var(--tv-surface)] hover:bg-[var(--tv-hover)] text-[var(--tv-text)] transition-colors"
+          >
+            Reset Base
           </button>
 
           <button
