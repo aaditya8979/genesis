@@ -5,7 +5,13 @@ from app.config import get_settings
 
 settings = get_settings()
 
-is_sqlite = settings.DATABASE_URL.startswith("sqlite")
+raw_db_url = settings.DATABASE_URL.strip()
+if raw_db_url.startswith("postgres://"):
+    raw_db_url = "postgresql+asyncpg://" + raw_db_url[len("postgres://"):]
+elif raw_db_url.startswith("postgresql://"):
+    raw_db_url = "postgresql+asyncpg://" + raw_db_url[len("postgresql://"):]
+
+is_sqlite = raw_db_url.startswith("sqlite")
 
 engine_kwargs: dict = {
     "echo": False,
@@ -21,7 +27,7 @@ else:
     engine_kwargs["pool_pre_ping"] = True
     engine_kwargs["pool_recycle"] = 1800
 
-engine = create_async_engine(settings.DATABASE_URL, **engine_kwargs)
+engine = create_async_engine(raw_db_url, **engine_kwargs)
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
