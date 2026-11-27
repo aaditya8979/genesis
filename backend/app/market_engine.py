@@ -2,6 +2,7 @@
 
 from collections import deque
 from dataclasses import dataclass, field
+import math
 import random
 import time
 
@@ -54,13 +55,16 @@ class StockRuntimeState:
     # Momentum regime drift (-1.0 bearish to +1.0 bullish) for realistic multi-candle trends
     momentum_bias: float = 0.0
     momentum_ticks_left: int = 0
+    # Stochastic GARCH-like volatility clustering multiplier
+    vol_cluster: float = 1.0
+    cluster_ticks_left: int = 0
     # Rolling 30-second order flow events: (timestamp_float, side 'BUY'|'SELL', qty)
     flow_window: deque = field(default_factory=deque)
     # Historical 5-second OHLC candles (ring buffer of 480 bars = 40 mins of high-res history)
     candles: deque = field(default_factory=lambda: deque(maxlen=480))
 
     def seed_history(self, now_sec: int) -> None:
-        """Seed 360 realistic 5s bars (30 mins) with mini-trends ending at current timestamp."""
+        """Seed 360 realistic 5s bars (30 mins) with organic trends, pullbacks & vol clusters."""
         if self.candles:
             return
         cur_bucket = align_bucket(now_sec)
@@ -69,11 +73,13 @@ class StockRuntimeState:
         bars: list[CandleBar] = []
         bar_count = 360
         walk_prices = [p]
-        trend = rng.uniform(-0.002, 0.002)
+        trend = rng.uniform(-0.0045, 0.0045)
+        cluster = 1.0
         for i in range(bar_count):
-            if i % 12 == 0:
-                trend = rng.uniform(-0.0035, 0.0035)
-            step = trend + rng.gauss(0, self.volatility * 1.45)
+            if i % rng.randint(8, 18) == 0:
+                trend = rng.uniform(-0.0075, 0.0075)
+                cluster = rng.choice([0.7, 1.0, 1.4, 2.1])
+            step = trend + rng.gauss(0, max(self.volatility, 0.0022) * 2.1 * cluster)
             p = max(settings.PRICE_FLOOR, round(p * (1.0 + step), 2))
             walk_prices.append(p)
         walk_prices.reverse()
@@ -82,10 +88,10 @@ class StockRuntimeState:
             ts = cur_bucket - (bar_count - idx) * CANDLE_INTERVAL_SEC
             o = walk_prices[idx]
             c = walk_prices[idx + 1] if idx < bar_count - 1 else self.current_price
-            spread = max(0.25, abs(c - o) * 0.45 + o * self.volatility * 1.25)
-            h = round(max(o, c) + rng.uniform(0.08, spread), 2)
-            l = max(settings.PRICE_FLOOR, round(min(o, c) - rng.uniform(0.08, spread), 2))
-            vol = rng.randint(120, 680)
+            spread = max(0.35, abs(c - o) * 0.65 + o * max(self.volatility, 0.0022) * 1.8)
+            h = round(max(o, c) + rng.uniform(0.10, spread), 2)
+            l = max(settings.PRICE_FLOOR, round(min(o, c) - rng.uniform(0.10, spread), 2))
+            vol = rng.randint(180, 950)
             bars.append(CandleBar(time=ts, open=o, high=h, low=l, close=c, volume=vol))
 
         self.candles.extend(bars)
@@ -111,7 +117,20 @@ class StockRuntimeState:
             self.candles.append(bar)
         return bar.to_dict()
 
-    def record_trade_impact(self, side: str, qty: int, now_sec: float | None = None, shift_anchor: bool = False) -> float:
+    def _max_sane_price(self) -> float:
+        return round(max(self.base_price * 15.0, 25000.0), 2)
+
+    def _clamp_price(self, val: float) -> float:
+        return max(settings.PRICE_FLOOR, min(self._max_sane_price(), round(val, 2)))
+
+    def record_trade_impact(
+        self,
+        side: str,
+        qty: int,
+        now_sec: float | None = None,
+        shift_anchor: bool = False,
+        update_anchor: bool = True,
+    ) -> float:
         """Apply AMM bonding curve price shift & update 30s crowd pressure meter."""
         ts = now_sec or time.time()
         signed_qty = qty if side in ("BUY", "COVER") else -qty
@@ -121,17 +140,18 @@ class StockRuntimeState:
         self.total_volume += qty
 
         effective_depth = self.liquidity_depth * 3.5
-        impact_factor = max(-0.45, min(0.45, signed_qty / effective_depth))
+        impact_factor = max(-0.25, min(0.25, signed_qty / effective_depth))
 
         self.prev_price = self.current_price
-        new_price = max(settings.PRICE_FLOOR, round(self.current_price * (1.0 + impact_factor), 2))
+        new_price = self._clamp_price(self.current_price * (1.0 + impact_factor))
         self.current_price = new_price
 
-        # Shift anchor partially on whale / heavy crowd orders so price discovery holds instead of snapping back
-        if shift_anchor:
-            self.anchor_price = max(settings.PRICE_FLOOR, round(self.anchor_price * 0.25 + new_price * 0.75, 2))
-        else:
-            self.anchor_price = max(settings.PRICE_FLOOR, round(self.anchor_price * 0.90 + new_price * 0.10, 2))
+        # Shift anchor only on real human/whale flow, never on synthetic noise sweeps
+        if update_anchor:
+            if shift_anchor:
+                self.anchor_price = self._clamp_price(self.anchor_price * 0.25 + new_price * 0.75)
+            else:
+                self.anchor_price = self._clamp_price(self.anchor_price * 0.96 + new_price * 0.04)
 
         self._upsert_candle(align_bucket(int(ts)), new_price, qty)
         return new_price
@@ -139,7 +159,7 @@ class StockRuntimeState:
     def apply_era_shock(self, delta_pct: float, now_sec: float | None = None) -> float:
         ts = now_sec or time.time()
         self.prev_price = self.current_price
-        new_price = max(settings.PRICE_FLOOR, round(self.current_price * (1.0 + delta_pct), 2))
+        new_price = self._clamp_price(self.current_price * (1.0 + delta_pct))
         self.current_price = new_price
         self.anchor_price = new_price
         self.era_open_price = self.prev_price
@@ -157,38 +177,87 @@ class StockRuntimeState:
     def force_price(self, target_price: float, now_sec: float | None = None) -> float:
         ts = now_sec or time.time()
         self.prev_price = self.current_price
-        clamped = max(settings.PRICE_FLOOR, round(target_price, 2))
+        clamped = self._clamp_price(target_price)
         self.current_price = clamped
         self.anchor_price = clamped
         self._upsert_candle(align_bucket(int(ts)), clamped, 350)
         return clamped
 
-    def apply_dynamic_tick(self, now_sec: int, vol_multiplier: float = 1.0, simulate_flow: bool = True) -> None:
-        """Realistic momentum-regime market maker simulation (vibrant candles + live order flow)."""
+    def apply_dynamic_tick(
+        self,
+        now_sec: int,
+        vol_multiplier: float = 1.0,
+        simulate_flow: bool = True,
+        sector_drift: float = 0.0,
+    ) -> None:
+        """Bounded, non-drifting Log-OU multi-regime simulation (lively candles without runaway)."""
         if self.momentum_ticks_left <= 0:
-            # Start a new short trend/consolidation micro-regime (6 to 18 ticks)
-            self.momentum_bias = random.choice([-1.0, -0.5, 0.0, 0.5, 1.0]) * random.uniform(0.35, 1.0)
-            self.momentum_ticks_left = random.randint(6, 18)
+            # Sustained unpredictable multi-candle waves (10 to 30s) with mean-reverting bias
+            if random.random() < 0.28:
+                self.momentum_bias = -self.momentum_bias * random.uniform(0.7, 1.15) or random.choice([-0.8, 0.8])
+            else:
+                self.momentum_bias = random.choice([-1.0, -0.65, -0.3, 0.3, 0.65, 1.0]) * random.uniform(0.5, 1.0)
+            self.momentum_ticks_left = random.randint(10, 30)
         else:
             self.momentum_ticks_left -= 1
 
-        # Gentle mean-reversion only when drifting far (>20%) from anchor, letting intra-band waves run freely
-        deviation = (self.current_price - self.anchor_price) / max(self.anchor_price, 1.0)
-        mean_pull = -0.025 * deviation if abs(deviation) > 0.12 else -0.005 * deviation
+        if self.cluster_ticks_left <= 0:
+            self.vol_cluster = random.choices([0.75, 1.1, 1.55, 2.1], weights=[22, 46, 22, 10])[0]
+            self.cluster_ticks_left = random.randint(8, 22)
+        else:
+            self.cluster_ticks_left -= 1
 
-        drift = self.momentum_bias * self.volatility * 0.75 * vol_multiplier
-        noise = self.volatility * 1.9 * vol_multiplier * random.gauss(0.0, 1.0)
-        pct_move = max(-0.045, min(0.045, drift + noise + mean_pull))
+        # Log-space Ornstein-Uhlenbeck mean reversion around anchor_price (zero upward compounding!)
+        anchor = max(settings.PRICE_FLOOR, min(self._max_sane_price(), self.anchor_price))
+        self.anchor_price = anchor
+        log_dev = math.log(max(self.current_price, settings.PRICE_FLOOR) / anchor)
 
+        # Gentle room for ±18% waves, firmer elastic pullback beyond ±20% so prices stay realistic forever
+        if abs(log_dev) > 0.22:
+            mean_pull = -0.045 * log_dev
+        elif abs(log_dev) > 0.12:
+            mean_pull = -0.015 * log_dev
+        else:
+            mean_pull = -0.004 * log_dev
+
+        # Counter-trend bias if momentum is pushing even further past ±22% from anchor
+        if (log_dev > 0.22 and self.momentum_bias > 0) or (log_dev < -0.22 and self.momentum_bias < 0):
+            self.momentum_bias *= -0.7
+
+        floor_recovery = 0.0012 if (self.current_price < 15.0 and log_dev < 0.0) else 0.0
+        eff_vol = max(self.volatility, 0.0022) * vol_multiplier * self.vol_cluster
+        low_price_boost = 1.35 if self.current_price < 35.0 else 1.0
+
+        # Subtract Ito half-variance correction (-0.5 * sigma^2) so E[log(P)] has zero upward drift
+        sigma = eff_vol * 1.65 * low_price_boost
+        ito_fix = -0.5 * (sigma ** 2)
+        drift = (self.momentum_bias * eff_vol * 0.75) + sector_drift + floor_recovery + ito_fix
+        noise = sigma * random.gauss(0.0, 1.0)
+        pct_move = max(-0.035, min(0.035, drift + noise + mean_pull))
+
+        # Hard peacetime band around anchor [0.55x, 1.75x] so a forgotten server stays sane for days
+        upper_band = min(self._max_sane_price(), round(anchor * 1.75, 2))
+        lower_band = max(settings.PRICE_FLOOR, round(anchor * 0.52, 2))
         self.prev_price = self.current_price
-        new_price = max(settings.PRICE_FLOOR, round(self.current_price * (1.0 + pct_move), 2))
+        raw_next = round(self.current_price * (1.0 + pct_move), 2)
+        new_price = max(lower_band, min(upper_band, max(settings.PRICE_FLOOR, raw_next)))
         self.current_price = new_price
 
-        # Simulate realistic institutional/retail market maker flow so 30s pressure & volume feel alive
+        # Balanced bot/institutional sweeps (never shift_anchor on synthetic noise!)
         sim_vol = 0
         if simulate_flow:
-            sim_vol = random.randint(25, 180)
-            flow_side = "BUY" if pct_move >= 0 else "SELL"
+            if random.random() < 0.045:
+                buy_prob = 0.32 if log_dev > 0.08 else 0.68 if log_dev < -0.08 else 0.50
+                sweep_side = "BUY" if random.random() < buy_prob else "SELL"
+                sweep_qty = random.randint(180, 560)
+                self.record_trade_impact(
+                    sweep_side, sweep_qty, float(now_sec), shift_anchor=False, update_anchor=False
+                )
+                self.current_price = max(lower_band, min(upper_band, self.current_price))
+                return
+
+            sim_vol = random.randint(45, 290)
+            flow_side = "BUY" if (pct_move > 0 or (pct_move == 0 and random.random() < 0.5)) else "SELL"
             self.flow_window.append((float(now_sec), flow_side, sim_vol))
             self.total_volume += sim_vol
 
@@ -243,6 +312,8 @@ class MarketEngine:
         self.tick_history: deque = deque(maxlen=180)
         self.last_orders_per_sec: float = 0.0
         self._order_timestamps: deque = deque()
+        self.sector_waves: dict[str, float] = {}
+        self._next_sector_rotation_ts: float = 0.0
         self.init_from_catalog()
 
     def init_from_catalog(self) -> None:
@@ -283,10 +354,10 @@ class MarketEngine:
 
     def _get_vol_multiplier(self) -> float:
         if self.volatility_regime == "CALM":
-            return 0.6
+            return 0.75
         if self.volatility_regime == "FRENZY":
-            return 2.6
-        return 1.4  # DYNAMIC default: lively, tradable candles
+            return 3.0
+        return 1.75  # DYNAMIC default: crisp multi-wave intraday action
 
     def record_order_throughput(self) -> None:
         now = time.time()
@@ -295,16 +366,39 @@ class MarketEngine:
             self._order_timestamps.popleft()
         self.last_orders_per_sec = round(len(self._order_timestamps) / 5.0, 2)
 
+    def _refresh_sector_rotations(self, now_sec: float) -> None:
+        if now_sec < self._next_sector_rotation_ts and self.sector_waves:
+            return
+        self._next_sector_rotation_ts = now_sec + random.uniform(18.0, 48.0)
+        for st in self.stocks.values():
+            if st.sector not in self.sector_waves or random.random() < 0.65:
+                self.sector_waves[st.sector] = random.choice([-0.0020, -0.0010, 0.0, 0.0010, 0.0020])
+
     def step_jitter_if_enabled(self) -> None:
         now_sec = int(time.time())
         if self.is_market_open and self.ticks_enabled:
+            self._refresh_sector_rotations(float(now_sec))
             mult = self._get_vol_multiplier()
             for st in self.stocks.values():
-                st.apply_dynamic_tick(now_sec, vol_multiplier=mult, simulate_flow=self.simulate_flow_enabled)
+                sec_drift = self.sector_waves.get(st.sector, 0.0)
+                st.apply_dynamic_tick(
+                    now_sec,
+                    vol_multiplier=mult,
+                    simulate_flow=self.simulate_flow_enabled,
+                    sector_drift=sec_drift,
+                )
         else:
             bucket = align_bucket(now_sec)
             for st in self.stocks.values():
                 st._upsert_candle(bucket, st.current_price, 0)
+
+    def reset_market_to_base(self) -> None:
+        """Restore all 30 equities smoothly back to Round 0 base prices with lively fresh candles."""
+        self.active_era_id = "BASE"
+        self.active_scenario_name = "Normal Trading — Round 0 Base"
+        self.active_headline = "GENESIS 2026 Market Reset — Fresh Round Open Across All 30 Equities"
+        self.volatility_regime = "DYNAMIC"
+        self.init_from_catalog()
 
     def _add_marker(self, ts_sec: int, label: str, color: str, symbol: str = "ALL") -> None:
         bucket = align_bucket(ts_sec)
@@ -429,7 +523,7 @@ class MarketEngine:
                     "anchor_price": st.anchor_price,
                     "prev_price": st.prev_price,
                     "total_volume": st.total_volume,
-                    "candles": [c.to_dict() for c in list(st.candles)[-480:]],
+                    "candles": [c.to_dict() for c in list(st.candles)[-120:]],
                 }
                 for sym, st in self.stocks.items()
             },
@@ -453,14 +547,19 @@ class MarketEngine:
         for sym, sdata in stocks_data.items():
             if sym in self.stocks:
                 st = self.stocks[sym]
-                st.current_price = max(settings.PRICE_FLOOR, float(sdata["current_price"]))
-                st.anchor_price = max(settings.PRICE_FLOOR, float(sdata["anchor_price"]))
-                st.prev_price = max(settings.PRICE_FLOOR, float(sdata.get("prev_price", st.current_price)))
+                # Guard against corrupted runaway snapshots from earlier builds
+                if float(sdata["current_price"]) > st._max_sane_price():
+                    continue
+                st.current_price = st._clamp_price(float(sdata["current_price"]))
+                st.anchor_price = st._clamp_price(float(sdata["anchor_price"]))
+                st.prev_price = st._clamp_price(float(sdata.get("prev_price", st.current_price)))
                 st.total_volume = int(sdata.get("total_volume", 0))
                 if sdata.get("candles"):
-                    st.candles.clear()
-                    for c in sdata["candles"]:
-                        st.candles.append(CandleBar(**c))
+                    valid_bars = [c for c in sdata["candles"] if float(c.get("high", 0)) <= st._max_sane_price()]
+                    if valid_bars:
+                        st.candles.clear()
+                        for c in valid_bars:
+                            st.candles.append(CandleBar(**c))
 
 
 market_engine = MarketEngine()
