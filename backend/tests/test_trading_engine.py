@@ -12,7 +12,6 @@ if TEST_DB_PATH.exists():
     TEST_DB_PATH.unlink()
 
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DB_PATH}"
-os.environ["ENVIRONMENT"] = "test"
 os.environ["BACKUP_DIR"] = "/tmp/genesis_test_backups"
 os.environ["ORDER_RATE_LIMIT_MAX_ORDERS"] = "50"  # Allow burst testing in unit suite
 
@@ -193,14 +192,13 @@ async def test_admin_topup_freeze_and_snapshot_restore():
         boot = (await ac.get("/api/v1/bootstrap", headers=headers)).json()
         assert boot["portfolio"]["cash_balance"] == 30000.0
 
-        # Place a trade to verify v2 snapshot preserves order history + idempotency across DB wipes
+        # Place a trade so v2 snapshot preserves order history + idempotency
         buy = await ac.post("/api/v1/trade/order", headers=headers, json={
             "symbol": "TMND", "action": "BUY", "quantity": 5, "client_order_id": "snap-tx-1"
         })
         assert buy.status_code == 200
         post_buy_cash = buy.json()["portfolio"]["cash_balance"]
 
-        # Trigger immediate backup cycle & verify status endpoint
         bnow = await ac.post("/api/v1/system/backup/now", headers=admin_headers)
         assert bnow.status_code == 200
         assert bnow.json()["status"]["local_latest_seq"] >= 0
@@ -210,7 +208,7 @@ async def test_admin_topup_freeze_and_snapshot_restore():
         assert snap["schema_version"] == 2
         real_snap_users = [u for u in snap["users"] if u.get("cohort") == "REAL"]
         assert len(real_snap_users) == 1
-        assert len(snap["users"]) == 41
+        assert len(snap["users"]) == 151
         assert any(t["client_order_id"] == "snap-tx-1" for t in snap["transactions"])
 
         # Freeze account -> trading blocked with 403
@@ -231,12 +229,42 @@ async def test_admin_topup_freeze_and_snapshot_restore():
 
         restore_res = await ac.post("/api/v1/system/restore", headers=admin_headers, json=snap)
         assert restore_res.status_code == 200
-        assert restore_res.json()["restored_users"] == 41
+        assert restore_res.json()["restored_users"] == 151
         assert restore_res.json()["restored_transactions"] >= 1
 
         restored_boot = (await ac.get("/api/v1/bootstrap", headers=headers)).json()
         assert restored_boot["portfolio"]["cash_balance"] == post_buy_cash
         assert any(tx["symbol"] == "TMND" for tx in restored_boot["transactions"])
+
+        reset_res = await ac.post("/api/v1/admin/market/reset-prices", headers=admin_headers)
+        assert reset_res.status_code == 200
+        assert reset_res.json()["stocks_reset"] == 30
+
+
+def test_15000_tick_long_run_price_bounded_stability():
+    """Prove Log-OU microstructure stays volatile yet strictly bounded across 15,000 ticks (~4.1 hrs)."""
+    market_engine.init_from_catalog()
+    market_engine.is_market_open = True
+    market_engine.ticks_enabled = True
+    market_engine.set_volatility_regime("DYNAMIC", simulate_flow=True)
+
+    for step in range(15000):
+        # Advance across simulated 1-second buckets
+        now_sec = 1795800000 + step
+        market_engine._refresh_sector_rotations(float(now_sec))
+        mult = market_engine._get_vol_multiplier()
+        for st in market_engine.stocks.values():
+            st.apply_dynamic_tick(
+                now_sec,
+                vol_multiplier=mult,
+                simulate_flow=True,
+                sector_drift=market_engine.sector_waves.get(st.sector, 0.0),
+            )
+
+    for sym, st in market_engine.stocks.items():
+        assert 10.0 <= st.current_price <= max(st.base_price * 2.5, 2500.0), f"{sym} escaped bounds: {st.current_price}"
+        assert st.anchor_price == st.base_price
+
 
 
 @pytest.mark.asyncio
