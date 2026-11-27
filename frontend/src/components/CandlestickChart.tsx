@@ -232,9 +232,12 @@ export function CandlestickChart() {
     const volumeSeries = chart.addHistogramSeries({
       priceFormat: { type: "volume" },
       priceScaleId: "vol",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     chart.priceScale("vol").applyOptions({
       scaleMargins: { top: 0.84, bottom: 0 },
+      visible: false,
     });
 
     chart.subscribeCrosshairMove((param) => {
@@ -270,11 +273,12 @@ export function CandlestickChart() {
           const len = resampledRef.current.length;
           if (!hasFittedWidthRef.current && width > 120 && len > 0) {
             hasFittedWidthRef.current = true;
-            const visibleWindow = Math.min(Math.max(len, 24), 68);
+            const visibleWindow = Math.min(Math.max(len, 24), 40);
             chart.timeScale().setVisibleLogicalRange({
               from: Math.max(-2, len - visibleWindow),
               to: len + 6,
             });
+            chart.priceScale("right").applyOptions({ autoScale: true });
           }
         }
       }
@@ -370,17 +374,21 @@ export function CandlestickChart() {
       );
 
       const len = resampled.length;
-      const visibleWindow = Math.min(Math.max(len, 24), 68);
+      const visibleWindow = Math.min(Math.max(len, 24), 40);
       const applyRange = () => {
+        const activeChart = chartRef.current;
+        if (!activeChart) return;
+        activeChart.priceScale("right").applyOptions({ autoScale: true });
         const w = containerRef.current?.clientWidth ?? 0;
         if (w > 120) {
           hasFittedWidthRef.current = true;
-          chartRef.current?.timeScale().setVisibleLogicalRange({
+          activeChart.timeScale().setVisibleLogicalRange({
             from: Math.max(-2, len - visibleWindow),
             to: len + 6,
           });
         }
       };
+      setAutoScale(true);
       applyRange();
       requestAnimationFrame(applyRange);
 
@@ -473,7 +481,7 @@ export function CandlestickChart() {
     if (len === 0) return;
 
     if (chartCommand === "FIT") {
-      const w = Math.min(Math.max(len, 24), 68);
+      const w = Math.min(Math.max(len, 24), 40);
       ts.setVisibleLogicalRange({ from: Math.max(-2, len - w), to: len + 6 });
       chart.priceScale("right").applyOptions({ autoScale: true });
       setAutoScale(true);
@@ -658,7 +666,11 @@ export function CandlestickChart() {
           </button>
           <button
             type="button"
-            onClick={() => setAutoScale(!autoScale)}
+            onClick={() => {
+              const next = !autoScale;
+              setAutoScale(next);
+              chartRef.current?.priceScale("right").applyOptions({ autoScale: next });
+            }}
             title="Toggle Auto Price Scaling"
             className={`px-1.5 py-0.5 rounded text-[11px] font-semibold transition-colors ${
               autoScale
