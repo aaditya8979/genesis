@@ -7,6 +7,7 @@ from decimal import Decimal
 import json
 import logging
 import time
+import uuid
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -124,15 +125,15 @@ class CohortUpdateRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Database Seeding & Snapshot Persistence Helpers
 # ---------------------------------------------------------------------------
+_DUMMY_FIRST_NAMES = [
+    "Aarav", "Vihaan", "Ishaan", "Kabir", "Reyansh", "Advaith", "Vivaan", "Arjun", "Sai", "Devansh",
+    "Anika", "Diya", "Myra", "Sara", "Kavya", "Rhea", "Pari", "Naina", "Ira", "Tara",
+    "Rohan", "Pranav", "Karthik", "Siddharth", "Nikhil", "Manav", "Tanishq", "Varun", "Rishabh", "Tejas",
+]
+_DUMMY_LAST_NAMES = ["Mehta", "Rao", "Nair", "Kapoor", "Iyer", "Bansal", "Deshmukh", "Kulkarni", "Reddy", "Malhotra"]
 DUMMY_ROSTER_NAMES = [
-    "Aarav Mehta", "Vihaan Rao", "Ishaan Nair", "Kabir Menon", "Reyansh Kapoor",
-    "Advaith Iyer", "Vivaan Joshi", "Arjun Bansal", "Sai Krishnan", "Devansh Gupta",
-    "Anika Deshmukh", "Diya Sengupta", "Myra Chatterjee", "Sara Kulkarni", "Kavya Tiwari",
-    "Rhea Chauhan", "Pari Malhotra", "Naina Aggarwal", "Ira Chatterjee", "Tara Siddiqui",
-    "Rohan Saxena", "Pranav Mishra", "Karthik Reddy", "Siddharth Jain", "Harshvardhan Goel",
-    "Nikhil Grover", "Yashwant Kumar", "Gaurav Shetty", "Manav Verma", "Tanishq Bhatia",
-    "Sneha Pillai", "Meera Hegde", "Nandini Dubey", "Simran Gill", "Shruti Pathak",
-    "Varun Khanna", "Ayushman Roy", "Rishabh Sinha", "Tejas Patel", "Omkar Kulkarni",
+    f"{_DUMMY_FIRST_NAMES[i % len(_DUMMY_FIRST_NAMES)]} {_DUMMY_LAST_NAMES[(i // len(_DUMMY_FIRST_NAMES)) % len(_DUMMY_LAST_NAMES)]}"
+    for i in range(150)
 ]
 
 
@@ -169,11 +170,16 @@ async def seed_initial_data() -> None:
             existing_stocks_res = await db.execute(select(Stock))
             existing_stocks = {s.symbol: s for s in existing_stocks_res.scalars().all()}
         else:
-            # Hydrate RAM prices from DB if restarting after crash
+            # Hydrate RAM prices from DB if restarting after crash (ignore runaway out-of-range artifacts)
             for sym, st_row in existing_stocks.items():
                 if sym in market_engine.stocks:
-                    market_engine.stocks[sym].current_price = float(st_row.current_price)
-                    market_engine.stocks[sym].anchor_price = float(st_row.anchor_price)
+                    st_mem = market_engine.stocks[sym]
+                    if float(st_row.current_price) <= st_mem._max_sane_price():
+                        st_mem.current_price = st_mem._clamp_price(float(st_row.current_price))
+                        st_mem.anchor_price = st_mem._clamp_price(float(st_row.anchor_price))
+                    else:
+                        st_row.current_price = d2(st_mem.base_price)
+                        st_row.anchor_price = d2(st_mem.base_price)
 
         ms_res = await db.execute(select(MarketSettings).where(MarketSettings.id == 1))
         ms = ms_res.scalar_one_or_none()
@@ -201,8 +207,8 @@ async def seed_initial_data() -> None:
             ):
                 existing_u.cohort = "DUMMY"
 
-        # Seed 40 realistic Dummy Simulation Bots isolated in DUMMY cohort
-        if "25DMY0001" not in existing_regs and existing_stocks:
+        # Seed 150 realistic Dummy Simulation Bots isolated in DUMMY cohort (idempotent on existing DBs)
+        if f"25DMY{len(DUMMY_ROSTER_NAMES):04d}" not in existing_regs and existing_stocks:
             rng = random.Random(202604)
             stock_syms = list(existing_stocks.keys())
             for idx, full_name in enumerate(DUMMY_ROSTER_NAMES, start=1):
@@ -222,15 +228,15 @@ async def seed_initial_data() -> None:
                 db.add(dummy_user)
                 await db.flush()
 
-                pick_syms = rng.sample(stock_syms, k=min(3, len(stock_syms)))
+                pick_syms = rng.sample(stock_syms, k=min(4, len(stock_syms)))
                 cash_left = Decimal(str(settings.STARTING_CASH))
                 for sym in pick_syms:
                     st_row = existing_stocks[sym]
                     live_p = float(market_engine.stocks[sym].current_price) if sym in market_engine.stocks else float(st_row.current_price)
-                    qty = rng.randint(4, 18)
+                    qty = rng.randint(3, 16)
                     cost = d2(live_p * qty)
-                    if cost <= cash_left * Decimal("0.32"):
-                        entry_p = d2(live_p * rng.uniform(0.92, 1.07))
+                    if cost <= cash_left * Decimal("0.30"):
+                        entry_p = d2(live_p * rng.uniform(0.90, 1.09))
                         cash_left = d2(cash_left - d2(entry_p * Decimal(qty)))
                         db.add(Holding(
                             user_id=dummy_user.id,
@@ -412,6 +418,39 @@ async def coalesced_trade_broadcaster() -> None:
             logger.exception("Error in coalesced_trade_broadcaster: %s", exc)
 
 
+async def run_autonomous_dummy_bot_trades(db: AsyncSession) -> None:
+    """Execute a small random batch of autonomous DUMMY bot trades when load is light."""
+    if not (market_engine.is_market_open and market_engine.ticks_enabled and market_engine.simulate_flow_enabled):
+        return
+    if market_engine.last_orders_per_sec > 35:
+        return  # Yield full DB capacity to real auditorium participants during heavy order bursts
+
+    bot_res = await db.execute(
+        select(User).where(User.cohort == "DUMMY", User.is_frozen == False).limit(150)  # noqa: E712
+    )
+    bots = bot_res.scalars().all()
+    if not bots:
+        return
+
+    syms = list(market_engine.stocks.keys())
+    sample_bots = random.sample(bots, k=min(4, len(bots)))
+    for bot in sample_bots:
+        sym = random.choice(syms)
+        action = random.choices(["BUY", "SELL", "SHORT", "COVER"], weights=[45, 25, 18, 12])[0]
+        qty = random.randint(2, 10)
+        try:
+            await execute_trade(
+                db=db,
+                user=bot,
+                symbol=sym,
+                action=action,
+                quantity=qty,
+                client_order_id=f"bot-{uuid.uuid4().hex[:18]}",
+            )
+        except Exception:
+            await db.rollback()
+
+
 async def market_tick_loop() -> None:
     tick_count = 0
     while True:
@@ -426,6 +465,8 @@ async def market_tick_loop() -> None:
 
             if tick_count % 3 == 0:
                 async with AsyncSessionLocal() as db:
+                    if tick_count % 6 == 0:
+                        await run_autonomous_dummy_bot_trades(db)
                     await run_short_squeeze_supervisor(db)
                     if ws_manager.admin_sockets:
                         overview = await compute_admin_overview(db)
@@ -449,7 +490,7 @@ async def lifespan(app: FastAPI):
     tick_task = asyncio.create_task(market_tick_loop())
     broadcaster_task = asyncio.create_task(coalesced_trade_broadcaster())
     snap_task = asyncio.create_task(snapshot_exporter_loop())
-    logger.info("GENESIS 2026 Exchange Engine online (30 equities, 10 eras, single-worker RAM mode)")
+    logger.info("GENESIS 2026 Exchange Engine online (30 equities, 10 eras, 150 active bots)")
     try:
         yield
     finally:
@@ -729,7 +770,6 @@ async def admin_import_real_users(
         details=f"Imported/updated REAL cohort (created={created}, updated={updated})",
     ))
     await db.commit()
-    request_background_backup(checkpoint=True)
     return {"status": "IMPORTED", "created": created, "updated": updated}
 
 
@@ -813,7 +853,6 @@ async def admin_topup(body: TopupRequest, _admin=Depends(verify_admin), db: Asyn
         details=f"Credited +₹{amt} to {clean_reg} ({body.note})",
     ))
     await db.commit()
-    request_background_backup(checkpoint=False)
 
     portfolio = await compute_user_portfolio(db, user.id)
     delivered = await ws_manager.send_to_user(user.id, {
@@ -885,7 +924,6 @@ async def admin_trigger_era(body: TriggerEraRequest, _admin=Depends(verify_admin
     liquidations = await run_short_squeeze_supervisor(db)
     payload = market_engine.build_tick_payload("ERA_SHOCK")
     await ws_manager.broadcast_market(payload)
-    request_background_backup(checkpoint=True)
 
     return {
         "status": "ERA_APPLIED",
@@ -908,7 +946,6 @@ async def admin_inject_whale(body: WhaleOrderRequest, _admin=Depends(verify_admi
     ))
     await db.commit()
     await ws_manager.broadcast_market(market_engine.build_tick_payload("WHALE_ALERT"))
-    request_background_backup(checkpoint=True)
     return res
 
 
@@ -960,6 +997,41 @@ async def admin_broadcast_headline(body: BroadcastHeadlineRequest, _admin=Depend
     await db.commit()
     await ws_manager.broadcast_market(market_engine.build_tick_payload("GLOBAL_ALERT"))
     return {"active_headline": body.headline}
+
+
+@app.post("/api/v1/admin/market/reset-prices")
+async def admin_reset_market_prices(_admin=Depends(verify_admin), db: AsyncSession = Depends(get_db)):
+    """Reset all 30 equities & candles back to Round 0 base levels and normalize DUMMY bot wallets."""
+    market_engine.reset_market_to_base()
+    stocks_res = await db.execute(select(Stock))
+    for srow in stocks_res.scalars().all():
+        if srow.symbol in market_engine.stocks:
+            st = market_engine.stocks[srow.symbol]
+            srow.current_price = d2(st.current_price)
+            srow.anchor_price = d2(st.anchor_price)
+
+    # Normalize inflated DUMMY simulation wallets back to ₹25k if runaway test trades bloated them (REAL students untouched!)
+    dummy_ids_res = await db.execute(select(User.id).where(User.cohort == "DUMMY"))
+    dummy_ids = {r[0] for r in dummy_ids_res.fetchall()}
+    if dummy_ids:
+        dw_res = await db.execute(select(Wallet).where(Wallet.user_id.in_(dummy_ids)))
+        for dw in dw_res.scalars().all():
+            if dw.cash_balance > Decimal("100000.00") or dw.collateral_locked > Decimal("100000.00"):
+                dw.cash_balance = d2(settings.STARTING_CASH)
+                dw.collateral_locked = Decimal("0.00")
+
+    ms_res = await db.execute(select(MarketSettings).where(MarketSettings.id == 1))
+    ms = ms_res.scalar_one_or_none()
+    if ms:
+        ms.active_era_id = market_engine.active_era_id
+        ms.active_scenario_name = market_engine.active_scenario_name
+        ms.active_headline = market_engine.active_headline
+
+    db.add(AdminAuditLog(action_type="MARKET_RESET_BASE", details="Reset 30 stocks to Round 0 Base levels"))
+    await db.commit()
+    await ws_manager.broadcast_market(market_engine.build_tick_payload("SNAPSHOT"))
+    request_background_backup(checkpoint=True)
+    return {"status": "RESET_COMPLETE", "stocks_reset": len(market_engine.stocks)}
 
 
 @app.patch("/api/v1/admin/volatility")
