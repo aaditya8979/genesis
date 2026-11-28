@@ -3,12 +3,35 @@ import { CandleBar } from "./types";
 const PRIMARY_HTTP = import.meta.env.VITE_API_URL || "";
 const FALLBACK_RAW = import.meta.env.VITE_FALLBACK_URLS || "";
 
-export const GATEWAY_HTTP_ENDPOINTS: string[] = [
-  PRIMARY_HTTP,
-  ...FALLBACK_RAW.split(",")
-    .map((s: string) => s.trim().replace(/\/+$/, ""))
-    .filter(Boolean),
-].filter((v, i, a) => a.indexOf(v) === i);
+function readApiOverride(): string {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const qp = params.get("api")?.trim();
+    if (qp && /^https?:\/\//i.test(qp)) {
+      const normalized = qp.replace(/\/+$/, "");
+      localStorage.setItem("genesis_api_override", normalized);
+      return normalized;
+    }
+    const stored = localStorage.getItem("genesis_api_override")?.trim() || "";
+    return /^https?:\/\//i.test(stored) ? stored.replace(/\/+$/, "") : "";
+  } catch {
+    return "";
+  }
+}
+
+const RUNTIME_OVERRIDE = readApiOverride();
+
+export const GATEWAY_HTTP_ENDPOINTS: string[] = (() => {
+  const explicit = [
+    RUNTIME_OVERRIDE,
+    PRIMARY_HTTP,
+    ...FALLBACK_RAW.split(",")
+      .map((s: string) => s.trim().replace(/\/+$/, ""))
+      .filter(Boolean),
+  ].filter(Boolean);
+  const unique = explicit.filter((v, i, a) => a.indexOf(v) === i);
+  return unique.length > 0 ? unique : [""];
+})();
 
 let activeGatewayIndex = 0;
 
@@ -77,14 +100,18 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
 
       if (!res.ok) {
         let detail = `HTTP ${res.status}`;
+        let hasJsonDetail = false;
         try {
           const j = await res.json();
-          detail = j.detail || detail;
+          if (j?.detail) {
+            detail = j.detail;
+            hasJsonDetail = true;
+          }
         } catch {
-          // ignore
+          // ignore non-JSON gateway responses
         }
-        // Only rotate gateway on 502/503/504 infrastructure errors, not 4xx validation errors
-        if (res.status >= 502 && attempts > 1 && i < attempts - 1) {
+        // Rotate on 502/503/504 OR opaque non-JSON 500 proxy errors
+        if ((res.status >= 502 || (res.status === 500 && !hasJsonDetail)) && attempts > 1 && i < attempts - 1) {
           rotateGateway();
           continue;
         }

@@ -54,6 +54,20 @@ async def test_login_simple_email_and_regno_only():
         assert res2.status_code == 200
         assert res2.json()["user"]["id"] == data["user"]["id"]
 
+        # Concurrent first-time login double-click never triggers IntegrityError HTTP 500
+        c1, c2 = await asyncio.gather(
+            ac.post("/api/v1/auth/login", json={
+                "email": "nitin.25bai11122@vitbhopal.ac.in",
+                "registration_no": "25BAI11122",
+            }),
+            ac.post("/api/v1/auth/login", json={
+                "email": "nitin.25bai11122@vitbhopal.ac.in",
+                "registration_no": "25BAI11122",
+            }),
+        )
+        assert c1.status_code == 200 and c2.status_code == 200
+        assert c1.json()["user"]["id"] == c2.json()["user"]["id"]
+
         # Conflict if wrong email uses existing reg_no
         res_bad = await ac.post("/api/v1/auth/login", json={
             "email": "attacker@vitbhopal.ac.in",

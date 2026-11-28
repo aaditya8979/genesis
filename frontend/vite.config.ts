@@ -12,6 +12,18 @@ export default defineConfig({
       "/api": {
         target: proxyTarget,
         changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on("error", (_err, _req, res) => {
+            if ("writeHead" in res && !res.headersSent) {
+              res.writeHead(503, { "Content-Type": "application/json" });
+              res.end(
+                JSON.stringify({
+                  detail: `Exchange backend unreachable at ${proxyTarget}. Start Docker stack (:8080) or pass ?api=https://your-ec2-domain`,
+                })
+              );
+            }
+          });
+        },
       },
       "/ws": {
         target: wsTarget,

@@ -15,6 +15,7 @@ from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, EmailStr, Field
 import random
 from sqlalchemy import desc, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import create_access_token, decode_token, get_current_user, verify_admin
@@ -558,17 +559,40 @@ async def student_login(body: StudentLoginRequest, db: AsyncSession = Depends(ge
                 detail="This Email is already linked to a different Registration Number.",
             )
 
-        user = User(
-            email=email,
-            registration_no=reg_no,
-            full_name=name_val,
-            role="PARTICIPANT",
-            cohort="REAL",
-            status="APPROVED",
-            is_frozen=False,
-        )
-        db.add(user)
-        await db.flush()
+        try:
+            user = User(
+                email=email,
+                registration_no=reg_no,
+                full_name=name_val,
+                role="PARTICIPANT",
+                cohort="REAL",
+                status="APPROVED",
+                is_frozen=False,
+            )
+            db.add(user)
+            await db.flush()
+            db.add(Wallet(
+                user_id=user.id,
+                cash_balance=d2(settings.STARTING_CASH),
+                collateral_locked=Decimal("0.00"),
+                total_credited=d2(settings.STARTING_CASH),
+                topup_count=0,
+            ))
+            await db.commit()
+            await db.refresh(user)
+        except IntegrityError:
+            await db.rollback()
+            res_retry = await db.execute(select(User).where(User.registration_no == reg_no))
+            user = res_retry.scalar_one_or_none()
+            if user is None or user.email.lower() != email:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This Email or Registration Number is already registered to another account.",
+                )
+
+    # Heal missing wallet row if user was imported/created externally
+    w_check = await db.execute(select(Wallet.id).where(Wallet.user_id == user.id))
+    if w_check.scalar_one_or_none() is None:
         db.add(Wallet(
             user_id=user.id,
             cash_balance=d2(settings.STARTING_CASH),
@@ -577,7 +601,6 @@ async def student_login(body: StudentLoginRequest, db: AsyncSession = Depends(ge
             topup_count=0,
         ))
         await db.commit()
-        await db.refresh(user)
 
     token = create_access_token(user.id, user.email, user.registration_no, user.role)
     portfolio = await compute_user_portfolio(db, user.id)
