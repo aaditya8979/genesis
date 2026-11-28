@@ -52,6 +52,17 @@ elif [[ -f /etc/os-release ]] && grep -qi 'amzn' /etc/os-release; then
   fi
 fi
 
+# Ensure docker-buildx >= 0.17 is present on Amazon Linux 2023 for docker compose build
+if [[ -f /etc/os-release ]] && grep -qi 'amzn' /etc/os-release && ! docker buildx version 2>/dev/null | grep -qE 'v0\.(1[7-9]|[2-9][0-9])'; then
+  sudo mkdir -p /usr/local/lib/docker/cli-plugins
+  BX_ARCH=$(uname -m)
+  [[ "$BX_ARCH" == "x86_64" ]] && BX_ARCH="amd64"
+  [[ "$BX_ARCH" == "aarch64" ]] && BX_ARCH="arm64"
+  BX_URL=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest | grep -oE "https://github.com/docker/buildx/releases/download/[^\"]+\.linux-${BX_ARCH}" | head -n 1)
+  sudo curl -fsSL "$BX_URL" -o /usr/local/lib/docker/cli-plugins/docker-buildx
+  sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+fi
+
 DOCKER_COMPOSE="docker compose"
 if ! docker info > /dev/null 2>&1; then
   DOCKER_COMPOSE="sudo docker compose"
