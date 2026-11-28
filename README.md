@@ -27,8 +27,12 @@ chmod +x scripts/setup_ec2.sh scripts/run_standby.sh scripts/backup_drill.sh
 
 ## Local Verification & Warm-Standby Failover
 ```bash
-# Start full local mirror (Postgres + Backend + built Vite/Nginx SPA on :8080 + optional cloudflared)
+# Option 1 (Recommended): Start full local stack (Postgres + Backend + Vite/Nginx on http://localhost:8080)
 ./scripts/run_standby.sh
+
+# Option 2 (Direct Dev without Docker): Run Backend on :8000 + Vite on :5173
+cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/uvicorn app.main:app --port 8000
+cd frontend && npm install && npm run dev
 
 # Verify full v2 snapshot & backup health against running stack
 ./scripts/backup_drill.sh http://127.0.0.1:8080
