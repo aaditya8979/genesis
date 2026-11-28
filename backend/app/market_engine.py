@@ -427,10 +427,12 @@ class MarketEngine:
             "active_era_id": self.active_era_id,
             "active_scenario_name": self.active_scenario_name,
             "active_headline": self.active_headline,
-            "event_feed": list(self.event_feed),
-            "chart_markers": list(self.chart_markers),
             "stocks": [st.to_tick_dict(now) for st in self.stocks.values()],
         }
+        # Omit static news & markers from 1Hz PRICE_TICK to save ~40% EC2 egress bandwidth across 1,000 sockets
+        if event_name != "PRICE_TICK":
+            payload["event_feed"] = list(self.event_feed)
+            payload["chart_markers"] = list(self.chart_markers)
         self.tick_history.append(payload)
         return payload
 

@@ -63,7 +63,7 @@ class WebSocketManager:
         serialized = dumps_json(payload)
         sockets = list(self.market_sockets.keys())
         results = await asyncio.gather(
-            *(self._safe_send(ws, serialized, timeout=0.25) for ws in sockets),
+            *(self._safe_send(ws, serialized, timeout=0.4) for ws in sockets),
             return_exceptions=True,
         )
         self.total_broadcasts += 1

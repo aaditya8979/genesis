@@ -21,9 +21,9 @@ engine_kwargs: dict = {
 if is_sqlite:
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 else:
-    # Sized for 1,000 concurrent campus users on asyncpg
-    engine_kwargs["pool_size"] = 30
-    engine_kwargs["max_overflow"] = 30
+    # Sized for 1,000 concurrent users within t3.micro (1GB RAM) Postgres budget
+    engine_kwargs["pool_size"] = 15
+    engine_kwargs["max_overflow"] = 20
     engine_kwargs["pool_pre_ping"] = True
     engine_kwargs["pool_recycle"] = 1800
 

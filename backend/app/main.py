@@ -404,12 +404,12 @@ _trade_dirty_event = asyncio.Event()
 
 
 async def coalesced_trade_broadcaster() -> None:
-    """Coalesce rapid order bursts (e.g. 400 trades in 1s) into at most 1 broadcast every 150ms."""
+    """Coalesce rapid order bursts (e.g. 400 trades in 1s) into at most 1 broadcast every 250ms."""
     while True:
         try:
             await _trade_dirty_event.wait()
-            # Small batch window to coalesce simultaneous fills
-            await asyncio.sleep(0.15)
+            # Small batch window to coalesce simultaneous fills cleanly on t3.micro
+            await asyncio.sleep(0.25)
             _trade_dirty_event.clear()
             payload = market_engine.build_tick_payload("PRICE_TICK")
             await ws_manager.broadcast_market(payload)
@@ -423,8 +423,8 @@ async def run_autonomous_dummy_bot_trades(db: AsyncSession) -> None:
     """Execute a small random batch of autonomous DUMMY bot trades when load is light."""
     if not (market_engine.is_market_open and market_engine.ticks_enabled and market_engine.simulate_flow_enabled):
         return
-    if market_engine.last_orders_per_sec > 35:
-        return  # Yield full DB capacity to real auditorium participants during heavy order bursts
+    if ws_manager.active_count >= 50 or market_engine.last_orders_per_sec >= 15:
+        return  # Yield 100% of DB/CPU capacity to live participants during event bursts
 
     bot_res = await db.execute(
         select(User).where(User.cohort == "DUMMY", User.is_frozen == False).limit(150)  # noqa: E712

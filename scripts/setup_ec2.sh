@@ -33,8 +33,9 @@ fi
 echo "=== 3. Installing Docker Engine & Compose Plugin if Missing ==="
 if ! command -v docker &> /dev/null; then
   if [[ -f /etc/os-release ]] && grep -qi 'amzn' /etc/os-release; then
-    sudo dnf install -y docker
+    sudo dnf install -y docker git cronie
     sudo systemctl enable --now docker
+    sudo systemctl enable --now crond || true
     sudo mkdir -p /usr/local/lib/docker/cli-plugins
     ARCH=$(uname -m)
     sudo curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${ARCH}" \
@@ -44,6 +45,11 @@ if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com | sudo sh
   fi
   sudo usermod -aG docker "$USER" || true
+elif [[ -f /etc/os-release ]] && grep -qi 'amzn' /etc/os-release; then
+  sudo systemctl enable --now docker || true
+  if ! command -v crontab &> /dev/null; then
+    sudo dnf install -y cronie && sudo systemctl enable --now crond || true
+  fi
 fi
 
 DOCKER_COMPOSE="docker compose"

@@ -3,7 +3,8 @@ services:
     image: postgres:15-alpine
     container_name: genesis_postgres
     restart: always
-    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB"]
+    mem_limit: 280m
+    command: ["postgres", "-c", "max_connections=80", "-c", "shared_buffers=96MB", "-c", "effective_cache_size=256MB", "-c", "work_mem=2MB", "-c", "maintenance_work_mem=32MB", "-c", "checkpoint_completion_target=0.9"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-genesis_admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-genesis_strong_pass_2026}
@@ -22,6 +23,7 @@ services:
     build: ./backend
     container_name: genesis_backend
     restart: always
+    mem_limit: 460m
     environment:
       ENVIRONMENT: production
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-genesis_admin}:${POSTGRES_PASSWORD:-genesis_strong_pass_2026}@postgres:5432/${POSTGRES_DB:-genesis_db}
@@ -60,6 +62,7 @@ services:
         VITE_FALLBACK_URLS: ${VITE_FALLBACK_URLS:-}
     container_name: genesis_nginx
     restart: always
+    mem_limit: 120m
     ports:
       - "80:80"
       - "443:443"
